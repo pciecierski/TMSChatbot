@@ -3,11 +3,14 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import uuid
 import json
+import os
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.responses import PlainTextResponse
+import httpx
 from pydantic import BaseModel
 
 
@@ -109,6 +112,10 @@ def load_store() -> None:
 
 load_store()
 
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+
 FIELDS = [
     ("client_name", "Podaj nazwę zleceniodawcy."),
     ("pickup", "Podaj adres załadunku (ulica, miasto, kraj)."),
@@ -161,6 +168,28 @@ def enqueue_notification(session_id: Optional[str], message: str) -> None:
     if not session_id:
         return
     session_notifications.setdefault(session_id, []).append(message)
+
+
+def send_whatsapp_cloud_message(to: str, body: str) -> None:
+    if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+        return
+    url = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": body},
+    }
+    try:
+        httpx.post(
+            url,
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+            json=payload,
+            timeout=10,
+        )
+    except Exception:
+        # Fail silently to avoid breaking webhook; consider logging in real env
+        pass
 
 
 app = FastAPI(title="Transport Chatbot API", version="0.1.0")
@@ -407,6 +436,57 @@ def set_offer(order_id: str, offer: Offer):
 def get_notifications(sessionId: str) -> Dict[str, List[str]]:
     msgs = session_notifications.pop(sessionId, [])
     return {"messages": msgs}
+
+
+@app.get("/webhook/whatsapp/meta")
+def whatsapp_meta_verify(
+    hub_mode: Optional[str] = None,
+    hub_challenge: Optional[str] = None,
+    hub_verify_token: Optional[str] = None,
+) -> PlainTextResponse:
+    if hub_mode == "subscribe" and hub_verify_token == WHATSAPP_VERIFY_TOKEN:
+        return PlainTextResponse(hub_challenge or "")
+    raise HTTPException(status_code=403, detail="Verification failed")
+
+
+@app.post("/webhook/whatsapp/meta")
+async def whatsapp_meta_webhook(payload: Dict) -> Dict[str, str]:
+    entries = payload.get("entry", [])
+    for entry in entries:
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            messages = value.get("messages", [])
+            for msg in messages:
+                if msg.get("type") != "text":
+                    continue
+                from_id = msg.get("from")
+                text = msg.get("text", {}).get("body", "")
+                if not from_id or not text:
+                    continue
+                reply = chat_message(ChatRequest(sessionId=from_id, message=text))
+                send_whatsapp_cloud_message(from_id, reply.reply)
+    return {"status": "ok"}
+
+
+@app.post("/webhook/whatsapp")
+def whatsapp_webhook(
+    Body: str = Form(...),
+    WaId: Optional[str] = Form(None),
+    From: Optional[str] = Form(None),
+) -> PlainTextResponse:
+    """
+    Simple Twilio WhatsApp webhook.
+    Uses WaId/From as sessionId, routes message through chat logic, returns TwiML.
+    """
+    session_id = (WaId or From or "").strip() or str(uuid.uuid4())
+    reply = chat_message(ChatRequest(sessionId=session_id, message=Body))
+    twiml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<Response><Message>"
+        f"{reply.reply}"
+        "</Message></Response>"
+    )
+    return PlainTextResponse(content=twiml, media_type="application/xml")
 
 
 static_path = Path(__file__).parent / "static"

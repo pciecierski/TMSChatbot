@@ -30,6 +30,20 @@ Panel admina (lista zleceń): http://localhost:8000/admin
 4. Persistent data: w Railway dodaj Volume i zamontuj go w `/app/server/data`, by `orders.json` przetrwał restarty.
 5. Po deploy otrzymasz publiczny URL (np. https://…railway.app). Front statyczny jest serwowany z tego samego procesu.
 
+## WhatsApp (Twilio)
+- Webhook: `POST /webhook/whatsapp` – przyjmuje pola `Body`, `WaId`/`From` (formularz x-www-form-urlencoded z Twilio) i odsyła TwiML z odpowiedzią chatbota.
+- Skonfiguruj w Twilio Sandbox lub WhatsApp Business API adres webhooka: `https://<twoj_host>/webhook/whatsapp`.
+- Identyfikator sesji to `WaId` (numer użytkownika), więc rozmowa jest utrzymywana per numer.
+
+## WhatsApp Cloud API (Meta)
+- Weryfikacja webhooka: `GET /webhook/whatsapp/meta` z parametrami `hub.mode`, `hub.challenge`, `hub.verify_token`.
+- Odbiór wiadomości: `POST /webhook/whatsapp/meta` (payload z Graph API). Obsługuje wiadomości tekstowe, sesja po numerze `from`.
+- Odpowiedzi są wysyłane przez Graph API: `POST https://graph.facebook.com/v19.0/<PHONE_NUMBER_ID>/messages`.
+- Wymagane zmienne środowiskowe:
+  - `WHATSAPP_VERIFY_TOKEN` – Twój token do weryfikacji webhooka.
+  - `WHATSAPP_TOKEN` – permanentny access token z Meta.
+  - `WHATSAPP_PHONE_NUMBER_ID` – ID numeru WhatsApp (z konfiguracji Cloud API).
+
 ## Notatki
 - Stan i zlecenia trzymane w pamięci procesu; do demo/prototype OK.
 - Static front (HTML/JS/CSS) serwowany z FastAPI (`/`).

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Podgląd zlecenia - Transport Chatbot</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div>
+          <h1>Podgląd zlecenia</h1>
+          <p>Tylko do odczytu – link dla zleceniodawcy</p>
+        </div>
+        <div class="header-actions">
+          <a class="button secondary" href="/">Powrót do czatu</a>
+        </div>
+      </header>
+
+      <main>
+        <div class="panel">
+          <div id="loading" class="muted">Ładowanie danych zlecenia...</div>
+          <div id="error" class="empty hidden"></div>
+          <div id="order-view" class="order-card hidden">
+            <div class="order-header">
+              <div><span class="badge">ID</span> <span id="order-id"></span></div>
+              <div class="muted" id="order-date"></div>
+            </div>
+            <div class="order-route" id="order-route"></div>
+            <div class="order-meta">
+              <strong id="order-client"></strong>
+            </div>
+            <div class="order-meta">
+              <span><strong>Kontakt:</strong> <span id="order-contact"></span></span>
+              <span><strong>Ładunek:</strong> <span id="order-cargo"></span></span>
+              <span><strong>Termin załadunku:</strong> <span id="order-pickup-time"></span></span>
+              <span><strong>Wymagania:</strong> <span id="order-req"></span></span>
+            </div>
+            <div id="offer-box" class="offer-box"></div>
+          </div>
+        </div>
+      </main>
+    </div>
+    <script src="/public.js"></script>
+  </body>
+</html>

@@ -245,3 +245,36 @@ button:disabled,
   padding: 12px;
   color: #6b7280;
 }
+
+.hidden {
+  display: none;
+}
+
+.offer-box {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+}
+
+.offer-details {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #374151;
+}
+
+.share-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.share-row input {
+  flex: 1;
+  background: #f9fafb;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  padding: 10px 12px;
+}

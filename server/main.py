@@ -5,7 +5,7 @@ import uuid
 import json
 import os
 
-from fastapi import FastAPI, HTTPException, Form, Query
+from fastapi import FastAPI, HTTPException, Form, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -41,6 +41,14 @@ class Order(BaseModel):
     data: Dict[str, str]
     createdBySession: Optional[str] = None
     offer: Optional[Offer] = None
+    publicToken: str
+
+
+class PublicOrder(BaseModel):
+    id: str
+    createdAt: datetime
+    data: Dict[str, str]
+    offer: Optional[Offer] = None
 
 
 # In-memory stores (swap to Redis/DB later)
@@ -60,6 +68,7 @@ def order_to_dict(order: Order) -> Dict:
         "createdAt": order.createdAt.isoformat(),
         "data": order.data,
         "createdBySession": order.createdBySession,
+        "publicToken": order.publicToken,
     }
     if order.offer:
         data["offer"] = {
@@ -89,6 +98,7 @@ def dict_to_order(data: Dict) -> Order:
         data=data.get("data", {}),
         createdBySession=data.get("createdBySession"),
         offer=offer_obj,
+        publicToken=data.get("publicToken") or str(uuid.uuid4()),
     )
 
 
@@ -100,11 +110,16 @@ def persist_store() -> None:
 def load_store() -> None:
     if not ORDERS_FILE.exists():
         return
+    changed = False
     try:
         loaded = json.loads(ORDERS_FILE.read_text())
         for item in loaded:
             o = dict_to_order(item)
+            if not item.get("publicToken"):
+                changed = True
             orders[o.id] = o
+        if changed:
+            persist_store()
     except Exception:
         # If file is corrupted, start empty but keep file for inspection
         pass
@@ -174,6 +189,13 @@ def enqueue_notification(session_id: Optional[str], message: str) -> None:
     session_notifications.setdefault(session_id, []).append(message)
 
 
+def find_order_by_public_token(token: str) -> Optional[Order]:
+    for order in orders.values():
+        if order.publicToken == token:
+            return order
+    return None
+
+
 def send_whatsapp_cloud_message(to: str, body: str) -> None:
     if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
         return
@@ -212,8 +234,7 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/chat/message", response_model=ChatReply)
-def chat_message(payload: ChatRequest) -> ChatReply:
+def process_chat_message(payload: ChatRequest, base_url: str = "") -> ChatReply:
     session_id = payload.sessionId.strip()
     message = payload.message.strip()
 
@@ -360,10 +381,13 @@ def chat_message(payload: ChatRequest) -> ChatReply:
                 createdAt=datetime.utcnow(),
                 data=state["fields"].copy(),
                 createdBySession=session_id,
+                publicToken=str(uuid.uuid4()),
             )
             persist_store()
             state["mode"] = "done"
-            reply_text = f"Zlecenie zapisane. ID: {order_id}"
+            token = orders[order_id].publicToken
+            link = f"{base_url}/view/{token}" if base_url else f"/view/{token}"
+            reply_text = f"Zlecenie zapisane. ID: {order_id}\nLink podglądu: {link}"
             return ChatReply(reply=reply_text, done=True, orderId=order_id, collected=state["fields"])
         if message_lower.startswith(("n", "x")):
             state = reset_session(session_id)
@@ -400,12 +424,32 @@ def chat_message(payload: ChatRequest) -> ChatReply:
     return ChatReply(reply=initial_prompt(), nextField="choice")
 
 
+@app.post("/chat/message", response_model=ChatReply)
+def chat_message(payload: ChatRequest, request: Request) -> ChatReply:
+    req_base = str(request.base_url).rstrip("/") if request else ""
+    env_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    base_url = req_base or env_base
+    return process_chat_message(payload, base_url)
+
+
 @app.get("/orders/{order_id}", response_model=Order)
 def get_order(order_id: str) -> Order:
     order = orders.get(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     return order
+
+
+@app.get("/orders/{order_id}/public-link")
+def get_public_link(order_id: str, request: Request) -> Dict[str, str]:
+    order = orders.get(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    base_url = str(request.base_url).rstrip("/")
+    return {
+        "token": order.publicToken,
+        "url": f"{base_url}/view/{order.publicToken}",
+    }
 
 
 @app.get("/orders", response_model=Dict[str, Order])
@@ -438,6 +482,14 @@ def set_offer(order_id: str, offer: Offer):
     orders[order_id] = order
     persist_store()
     return {"status": "ok"}
+
+
+@app.get("/public/orders/{public_token}", response_model=PublicOrder)
+def get_public_order(public_token: str) -> PublicOrder:
+    order = find_order_by_public_token(public_token)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return PublicOrder(id=order.id, createdAt=order.createdAt, data=order.data, offer=order.offer)
 
 
 @app.get("/chat/notifications")
@@ -474,7 +526,8 @@ async def whatsapp_meta_webhook(payload: Dict) -> Dict[str, str]:
                 st = sessions.get(from_id) or reset_session(from_id)
                 st["whatsapp"] = from_id
                 sessions[from_id] = st
-                reply = chat_message(ChatRequest(sessionId=from_id, message=text))
+                env_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+                reply = process_chat_message(ChatRequest(sessionId=from_id, message=text), env_base)
                 send_whatsapp_cloud_message(from_id, reply.reply)
     return {"status": "ok"}
 
@@ -493,7 +546,8 @@ def whatsapp_webhook(
     st = sessions.get(session_id) or reset_session(session_id)
     st["whatsapp"] = session_id
     sessions[session_id] = st
-    reply = chat_message(ChatRequest(sessionId=session_id, message=Body))
+    env_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    reply = process_chat_message(ChatRequest(sessionId=session_id, message=Body), env_base)
     twiml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response><Message>"
@@ -514,6 +568,17 @@ def admin_page():
     if not admin_file.exists():
         raise HTTPException(status_code=404, detail="Admin page not found")
     return FileResponse(admin_file)
+
+
+@app.get("/view/{public_token}")
+def public_view(public_token: str):
+    """Serve read-only public view for a given order token."""
+    public_file = static_path / "public.html"
+    if not public_file.exists():
+        raise HTTPException(status_code=404, detail="Public page not found")
+    if not find_order_by_public_token(public_token):
+        raise HTTPException(status_code=404, detail="Order not found")
+    return FileResponse(public_file)
 
 
 app.mount("/", StaticFiles(directory=static_path, html=True), name="static")

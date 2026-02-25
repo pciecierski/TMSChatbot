@@ -40,6 +40,7 @@ function renderOrders(orders) {
     .map((order) => {
       const d = order.data || {};
       const offer = order.offer;
+      const shareUrl = `${window.location.origin}/view/${order.publicToken}`;
       return `
         <div class="order-card">
           <div class="order-header">
@@ -51,6 +52,10 @@ function renderOrders(orders) {
             <strong>${d.client_name || "Brak nazwy zleceniodawcy"}</strong>
           </div>
           ${offerSnippet(offer)}
+          <div class="share-row">
+            <input type="text" value="${shareUrl}" readonly />
+            <button type="button" class="button secondary copy-link" data-link="${shareUrl}">Kopiuj link podglądu</button>
+          </div>
           <details class="order-details">
             <summary>Szczegóły</summary>
             <ul>
@@ -112,6 +117,23 @@ function renderOrders(orders) {
       } catch (err) {
         console.error(err);
         statusSpan.textContent = "Błąd zapisu oferty.";
+      }
+    });
+  });
+
+  listEl.querySelectorAll(".copy-link").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const link = btn.dataset.link;
+      try {
+        await navigator.clipboard.writeText(link);
+        const original = btn.textContent;
+        btn.textContent = "Skopiowano";
+        setTimeout(() => {
+          btn.textContent = original;
+        }, 1500);
+      } catch (err) {
+        console.error(err);
+        btn.textContent = "Kopiowanie nieudane";
       }
     });
   });

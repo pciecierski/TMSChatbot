@@ -15,6 +15,8 @@ Panel admina (lista zleceń): http://localhost:8000/admin
 - `POST /chat/message` – prosty kreator krok-po-kroku, pamięta sesję po `sessionId`.
 - `GET /orders` – podgląd zapisanych zleceń (in-memory).
 - `GET /orders/{id}` – szczegóły zlecenia.
+- `GET /orders/{id}/public-link` – zwraca token i URL publicznego podglądu.
+- `GET /view/{publicToken}` / `GET /public/orders/{publicToken}` – publiczny, tylko do odczytu widok zlecenia (dane + oferta + status akceptacji).
 - `POST /orders/{id}/offer` – zapis oferty (cena, termin dostawy, kierowca) i powiadomienie do czatu.
 - `GET /chat/notifications?sessionId=...` – pobiera nowe powiadomienia (np. o ofercie) dla sesji czatu; po złożeniu oferty klient dostaje pytanie o akceptację, a odpowiedź zapisuje status na karcie zlecenia.
 - `GET /admin` – prosty widok listy wszystkich zleceń i formularz oferty.

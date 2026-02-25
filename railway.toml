@@ -1,0 +1,6 @@
+[build]
+# Domyślnie Nixpacks zbuduje aplikację Pythona z requirements.txt
+builder = "NIXPACKS"
+
+[deploy]
+command = "cd server && uvicorn main:app --host 0.0.0.0 --port ${PORT}"

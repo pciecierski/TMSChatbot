@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Panel administratora - Transport Chatbot</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div>
+          <h1>Panel administratora</h1>
+          <p>Lista wszystkich utworzonych zleceń</p>
+        </div>
+        <div class="header-actions">
+          <a class="button secondary" href="/">Wróć do czatu</a>
+          <button id="refresh-btn" type="button">Odśwież</button>
+        </div>
+      </header>
+
+      <main>
+        <div class="panel">
+          <div class="order-header">
+            <h2>Wszystkie zlecenia</h2>
+            <div class="order-meta">
+              <span class="badge" id="orders-count">0</span>
+              <span class="muted" id="status-text"></span>
+            </div>
+          </div>
+          <div id="orders-list" class="orders-list"></div>
+        </div>
+      </main>
+    </div>
+
+    <script src="admin.js"></script>
+  </body>
+</html>

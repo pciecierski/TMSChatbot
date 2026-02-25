@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Transport Chatbot</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div>
+          <h1>Transport Chatbot</h1>
+          <p>Tworzenie zlecenia transportowego przez chat</p>
+        </div>
+        <div class="header-actions">
+          <a class="button secondary" href="/admin">Panel administratora</a>
+        </div>
+      </header>
+      <main>
+        <div id="messages" class="messages"></div>
+        <form id="chat-form">
+          <input
+            id="message-input"
+            name="message"
+            type="text"
+            placeholder="Napisz wiadomość..."
+            autocomplete="off"
+            required
+          />
+          <button type="submit">Wyślij</button>
+        </form>
+      </main>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

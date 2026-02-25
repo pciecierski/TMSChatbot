@@ -5,7 +5,7 @@ import uuid
 import json
 import os
 
-from fastapi import FastAPI, HTTPException, Form
+from fastapi import FastAPI, HTTPException, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -137,6 +137,7 @@ def reset_session(session_id: str) -> Dict:
         "edit_order_id": None,
         "edit_field": None,
         "pending_accept_order": None,
+        "whatsapp": None,
     }
     return sessions[session_id]
 
@@ -348,6 +349,8 @@ def chat_message(payload: ChatRequest) -> ChatReply:
     # NEW FLOW: Confirmation step
     if state["mode"] == "new" and state["step"] == len(FIELDS):
         if message_lower.startswith(("t", "y")):
+            if state.get("whatsapp") and "whatsapp" not in state["fields"]:
+                state["fields"]["whatsapp"] = state["whatsapp"]
             order_id = str(uuid.uuid4())[:8]
             orders[order_id] = Order(
                 id=order_id,
@@ -427,6 +430,8 @@ def set_offer(order_id: str, offer: Offer):
     enqueue_notification(order.createdBySession, offer_text)
     if order.createdBySession:
         acceptance_pending[order.createdBySession] = order_id
+        # Wyślij proaktywnie do WhatsApp (jeśli mamy token/phone_id)
+        send_whatsapp_cloud_message(order.createdBySession, offer_text)
     orders[order_id] = order
     persist_store()
     return {"status": "ok"}
@@ -440,9 +445,9 @@ def get_notifications(sessionId: str) -> Dict[str, List[str]]:
 
 @app.get("/webhook/whatsapp/meta")
 def whatsapp_meta_verify(
-    hub_mode: Optional[str] = None,
-    hub_challenge: Optional[str] = None,
-    hub_verify_token: Optional[str] = None,
+    hub_mode: Optional[str] = Query(None, alias="hub.mode"),
+    hub_challenge: Optional[str] = Query(None, alias="hub.challenge"),
+    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
 ) -> PlainTextResponse:
     if hub_mode == "subscribe" and hub_verify_token == WHATSAPP_VERIFY_TOKEN:
         return PlainTextResponse(hub_challenge or "")
@@ -463,6 +468,9 @@ async def whatsapp_meta_webhook(payload: Dict) -> Dict[str, str]:
                 text = msg.get("text", {}).get("body", "")
                 if not from_id or not text:
                     continue
+                st = sessions.get(from_id) or reset_session(from_id)
+                st["whatsapp"] = from_id
+                sessions[from_id] = st
                 reply = chat_message(ChatRequest(sessionId=from_id, message=text))
                 send_whatsapp_cloud_message(from_id, reply.reply)
     return {"status": "ok"}
@@ -479,6 +487,9 @@ def whatsapp_webhook(
     Uses WaId/From as sessionId, routes message through chat logic, returns TwiML.
     """
     session_id = (WaId or From or "").strip() or str(uuid.uuid4())
+    st = sessions.get(session_id) or reset_session(session_id)
+    st["whatsapp"] = session_id
+    sessions[session_id] = st
     reply = chat_message(ChatRequest(sessionId=session_id, message=Body))
     twiml = (
         '<?xml version="1.0" encoding="UTF-8"?>'

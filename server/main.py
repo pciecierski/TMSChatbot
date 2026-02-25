@@ -148,7 +148,10 @@ def format_summary(fields: Dict[str, str]) -> str:
 
 
 def initial_prompt() -> str:
-    return "Co chcesz zrobić? wpisz: 'nowe', 'edytuj' lub 'lista'."
+    return (
+        "Co chcesz zrobić? wpisz: 'nowe', 'edytuj' lub 'lista'. "
+        "W dowolnej chwili możesz wpisać 'restart' i zacząć rozmowę od początku."
+    )
 
 
 def list_orders_by_client(client_query: str) -> str:

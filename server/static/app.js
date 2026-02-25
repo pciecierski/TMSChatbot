@@ -72,7 +72,9 @@ formEl.addEventListener("submit", (e) => {
 
 // Start conversation (bez wysyłania "start" od użytkownika)
 addMessage("Cześć! Pomogę Ci stworzyć zlecenie transportowe.");
-addMessage("Co chcesz zrobić? wpisz: 'nowe', 'edytuj' lub 'lista'.");
+addMessage(
+  "Co chcesz zrobić? wpisz: 'nowe', 'edytuj' lub 'lista'. W dowolnej chwili możesz wpisać 'restart' i zacząć rozmowę od początku."
+);
 
 async function pollNotifications() {
   try {

@@ -2,6 +2,11 @@ const listEl = document.getElementById("orders-list");
 const countEl = document.getElementById("orders-count");
 const statusEl = document.getElementById("status-text");
 const refreshBtn = document.getElementById("refresh-btn");
+const guardEl = document.getElementById("admin-guard");
+const guardForm = document.getElementById("admin-guard-form");
+const guardInput = document.getElementById("admin-guard-input");
+const guardCancel = document.getElementById("admin-guard-cancel");
+const guardError = document.getElementById("admin-guard-error");
 
 const API_BASE = "";
 
@@ -164,3 +169,47 @@ async function loadOrders() {
 refreshBtn.addEventListener("click", loadOrders);
 
 loadOrders();
+
+function openGuard() {
+  if (!guardEl) return;
+  guardEl.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  guardError.textContent = "";
+  guardInput.value = "";
+  setTimeout(() => guardInput.focus(), 0);
+}
+
+function closeGuard() {
+  if (!guardEl) return;
+  guardEl.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+if (guardEl && guardForm && guardInput && guardCancel) {
+  openGuard();
+
+  guardForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const value = guardInput.value.trim();
+    if (value === "qqq") {
+      closeGuard();
+      if (guardEl && typeof guardEl.remove === "function") {
+        guardEl.remove(); // usuń całkiem, by nie blokowało niczego nawet przy błędnym stylu/cache
+      }
+    } else {
+      guardError.textContent = "Nieprawidłowe hasło.";
+      guardInput.focus();
+    }
+  });
+
+  guardCancel.addEventListener("click", (e) => {
+    e.preventDefault();
+    window.location.href = "/";
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !guardEl.classList.contains("hidden")) {
+      window.location.href = "/";
+    }
+  });
+}

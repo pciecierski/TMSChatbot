@@ -1,6 +1,7 @@
 const messagesEl = document.getElementById("messages");
 const formEl = document.getElementById("chat-form");
 const inputEl = document.getElementById("message-input");
+const whatsappBtn = document.querySelector(".whatsapp-btn");
 
 const API_BASE = "";
 const NOTIF_INTERVAL_MS = 5000;
@@ -89,3 +90,12 @@ async function pollNotifications() {
 
 pollNotifications();
 setInterval(pollNotifications, NOTIF_INTERVAL_MS);
+
+// Na urządzeniach mobilnych użyj głębszego linku whatsapp://
+if (whatsappBtn) {
+  const mobileHref = whatsappBtn.getAttribute("data-wa-mobile");
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  if (mobileHref && isMobile) {
+    whatsappBtn.href = mobileHref;
+  }
+}

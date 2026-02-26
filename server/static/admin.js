@@ -59,6 +59,7 @@ function renderOrders(orders) {
           <details class="order-details">
             <summary>Szczegóły</summary>
             <ul>
+              <li><strong>WhatsApp:</strong> ${d.whatsapp || "-"}</li>
               <li><strong>Kontakt:</strong> ${d.contact || "-"}</li>
               <li><strong>Ładunek:</strong> ${d.cargo || "-"}</li>
               <li><strong>Termin załadunku:</strong> ${d.pickup_time || "-"}</li>

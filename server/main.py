@@ -5,7 +5,7 @@ import uuid
 import json
 import os
 
-from fastapi import FastAPI, HTTPException, Form, Query, Request
+from fastapi import FastAPI, HTTPException, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -41,14 +41,8 @@ class Order(BaseModel):
     data: Dict[str, str]
     createdBySession: Optional[str] = None
     offer: Optional[Offer] = None
+    status: str = "Aktywne"
     publicToken: str
-
-
-class PublicOrder(BaseModel):
-    id: str
-    createdAt: datetime
-    data: Dict[str, str]
-    offer: Optional[Offer] = None
 
 
 # In-memory stores (swap to Redis/DB later)
@@ -68,6 +62,7 @@ def order_to_dict(order: Order) -> Dict:
         "createdAt": order.createdAt.isoformat(),
         "data": order.data,
         "createdBySession": order.createdBySession,
+        "status": order.status,
         "publicToken": order.publicToken,
     }
     if order.offer:
@@ -98,6 +93,7 @@ def dict_to_order(data: Dict) -> Order:
         data=data.get("data", {}),
         createdBySession=data.get("createdBySession"),
         offer=offer_obj,
+        status=data.get("status", "Aktywne"),
         publicToken=data.get("publicToken") or str(uuid.uuid4()),
     )
 
@@ -110,16 +106,11 @@ def persist_store() -> None:
 def load_store() -> None:
     if not ORDERS_FILE.exists():
         return
-    changed = False
     try:
         loaded = json.loads(ORDERS_FILE.read_text())
         for item in loaded:
             o = dict_to_order(item)
-            if not item.get("publicToken"):
-                changed = True
             orders[o.id] = o
-        if changed:
-            persist_store()
     except Exception:
         # If file is corrupted, start empty but keep file for inspection
         pass
@@ -177,7 +168,17 @@ def list_orders_by_client(client_query: str) -> str:
         if query in client.lower():
             pickup = order.data.get("pickup", "-")
             delivery = order.data.get("delivery", "-")
-            matches.append(f"- {oid} | {client} | {pickup} -> {delivery}")
+            offer_status = "wycena: tak" if order.offer else "wycena: nie"
+            if order.offer:
+                if order.offer.accepted is True:
+                    acceptance_status = "akceptacja: tak"
+                elif order.offer.accepted is False:
+                    acceptance_status = "akceptacja: nie"
+                else:
+                    acceptance_status = "akceptacja: w trakcie"
+            else:
+                acceptance_status = "akceptacja: brak"
+            matches.append(f"- {oid} | {client} | {pickup} -> {delivery} | {offer_status} | {acceptance_status}")
     if not matches:
         return "Brak zleceń dla podanego zleceniodawcy."
     return "Znalezione zlecenia:\n" + "\n".join(matches)
@@ -187,13 +188,6 @@ def enqueue_notification(session_id: Optional[str], message: str) -> None:
     if not session_id:
         return
     session_notifications.setdefault(session_id, []).append(message)
-
-
-def find_order_by_public_token(token: str) -> Optional[Order]:
-    for order in orders.values():
-        if order.publicToken == token:
-            return order
-    return None
 
 
 def send_whatsapp_cloud_message(to: str, body: str) -> None:
@@ -234,7 +228,8 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-def process_chat_message(payload: ChatRequest, base_url: str = "") -> ChatReply:
+@app.post("/chat/message", response_model=ChatReply)
+def chat_message(payload: ChatRequest) -> ChatReply:
     session_id = payload.sessionId.strip()
     message = payload.message.strip()
 
@@ -253,8 +248,14 @@ def process_chat_message(payload: ChatRequest, base_url: str = "") -> ChatReply:
     # Pending offer acceptance flow override
     pending_order = acceptance_pending.get(session_id) or state.get("pending_accept_order")
     if pending_order:
-        state["mode"] = "offer_confirm"
-        state["pending_accept_order"] = pending_order
+        # Allow user to bypass acceptance prompt with top-level commands
+        bypass_cmds = {"lista", "list", "l", "nowe", "n", "edytuj", "edit", "e"}
+        if message_lower in bypass_cmds:
+            acceptance_pending.pop(session_id, None)
+            state = reset_session(session_id)
+        else:
+            state["mode"] = "offer_confirm"
+            state["pending_accept_order"] = pending_order
 
     if state["mode"] == "offer_confirm":
         order = orders.get(state["pending_accept_order"])
@@ -262,6 +263,10 @@ def process_chat_message(payload: ChatRequest, base_url: str = "") -> ChatReply:
             acceptance_pending.pop(session_id, None)
             state = reset_session(session_id)
             return ChatReply(reply="Oferta wygasła lub zlecenie nie istnieje. " + initial_prompt(), nextField="choice")
+        if order.status.lower() == "anulowane":
+            acceptance_pending.pop(session_id, None)
+            state = reset_session(session_id)
+            return ChatReply(reply="Zlecenie jest anulowane. " + initial_prompt(), nextField="choice")
 
         if message_lower.startswith(("t", "y")):
             order.offer.accepted = True
@@ -312,7 +317,14 @@ def process_chat_message(payload: ChatRequest, base_url: str = "") -> ChatReply:
             state["mode"] = "list_client"
             return ChatReply(reply="Podaj nazwę zleceniodawcy, aby wyszukać jego zlecenia.", nextField="client_name")
 
-        return ChatReply(reply=f"Nie rozumiem. {initial_prompt()}", nextField="choice")
+        return ChatReply(
+            reply=(
+                "Użyj poprawnego polecenia, moge pomóc w obsłudze zlecenia transportowego, wybierz co chcesz zrobić? "
+                "wpisz: 'nowe', 'edytuj' lub 'lista'. "
+                "W dowolnej chwili możesz wpisać 'restart' i zacząć rozmowę od początku."
+            ),
+            nextField="choice",
+        )
 
     # LIST FLOW: ask for client name and return matches
     if state["mode"] == "list_client":
@@ -335,7 +347,11 @@ def process_chat_message(payload: ChatRequest, base_url: str = "") -> ChatReply:
         options = ", ".join(FIELD_KEYS.keys())
         summary = format_summary(order.data)
         return ChatReply(
-            reply=f"Znalazłem zlecenie {message}:\n{summary}\nKtóre pole chcesz zmienić? ({options})",
+            reply=(
+                f"Znalazłem zlecenie {message}:\n{summary}\n"
+                f"Które pole chcesz zmienić? ({options})\n"
+                "Możliwe jest też usunięcie zlecenia — wpisz 'usuń' w trybie edycji, aby to zrobić."
+            ),
             nextField="field",
             collected=order.data,
             orderId=message,
@@ -344,12 +360,56 @@ def process_chat_message(payload: ChatRequest, base_url: str = "") -> ChatReply:
     # EDIT FLOW: choose field
     if state["mode"] == "edit_choose_field":
         field_key = message_lower.strip()
+        if field_key in {"usun", "usuń"}:
+            state["mode"] = "delete_confirm"
+            return ChatReply(
+                reply=f"Czy na pewno usunąć zlecenie {state['edit_order_id']}? (tak/nie)",
+                nextField="confirm_delete",
+                orderId=state["edit_order_id"],
+            )
         if field_key not in FIELD_KEYS:
             options = ", ".join(FIELD_KEYS.keys())
             return ChatReply(reply=f"Nie znam takiego pola. Wybierz jedno z: {options}", nextField="field")
         state["edit_field"] = field_key
         state["mode"] = "edit_new_value"
         return ChatReply(reply=f"Podaj nową wartość dla '{field_key}':", nextField=field_key)
+
+    if state["mode"] == "delete_confirm":
+        order_id = state.get("edit_order_id")
+        order = orders.get(order_id)
+        if not order_id or not order:
+            state = reset_session(session_id)
+            return ChatReply(reply="Zlecenie nie istnieje. Zacznij od nowa.", nextField="choice")
+        if message_lower.startswith(("t", "y")):
+            order.status = "Anulowane"
+            for sid, oid in list(acceptance_pending.items()):
+                if oid == order_id:
+                    acceptance_pending.pop(sid, None)
+            orders[order_id] = order
+            persist_store()
+            state["mode"] = "done"
+            return ChatReply(
+                reply=f"Zlecenie {order_id} oznaczone jako 'Anulowane'. Co dalej? wpisz: 'nowe', 'edytuj' lub 'lista'.",
+                orderId=order_id,
+                collected=order.data,
+                done=True,
+            )
+        if message_lower.startswith(("n", "x")):
+            state["mode"] = "edit_choose_field"
+            options = ", ".join(FIELD_KEYS.keys())
+            return ChatReply(
+                reply=(
+                    "Usunięcie anulowane. Które pole chcesz zmienić? "
+                    f"({options}). Możesz też wpisać 'usuń' aby skasować zlecenie."
+                ),
+                nextField="field",
+                orderId=order_id,
+            )
+        return ChatReply(
+            reply="Potwierdź usunięcie: wpisz 'tak' lub 'nie'.",
+            nextField="confirm_delete",
+            orderId=order_id,
+        )
 
     # EDIT FLOW: set new value
     if state["mode"] == "edit_new_value":
@@ -381,13 +441,12 @@ def process_chat_message(payload: ChatRequest, base_url: str = "") -> ChatReply:
                 createdAt=datetime.utcnow(),
                 data=state["fields"].copy(),
                 createdBySession=session_id,
+                status="Aktywne",
                 publicToken=str(uuid.uuid4()),
             )
             persist_store()
             state["mode"] = "done"
-            token = orders[order_id].publicToken
-            link = f"{base_url}/view/{token}" if base_url else f"/view/{token}"
-            reply_text = f"Zlecenie zapisane. ID: {order_id}\nLink podglądu: {link}"
+            reply_text = f"Zlecenie zapisane. ID: {order_id}"
             return ChatReply(reply=reply_text, done=True, orderId=order_id, collected=state["fields"])
         if message_lower.startswith(("n", "x")):
             state = reset_session(session_id)
@@ -424,32 +483,12 @@ def process_chat_message(payload: ChatRequest, base_url: str = "") -> ChatReply:
     return ChatReply(reply=initial_prompt(), nextField="choice")
 
 
-@app.post("/chat/message", response_model=ChatReply)
-def chat_message(payload: ChatRequest, request: Request) -> ChatReply:
-    req_base = str(request.base_url).rstrip("/") if request else ""
-    env_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-    base_url = req_base or env_base
-    return process_chat_message(payload, base_url)
-
-
 @app.get("/orders/{order_id}", response_model=Order)
 def get_order(order_id: str) -> Order:
     order = orders.get(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     return order
-
-
-@app.get("/orders/{order_id}/public-link")
-def get_public_link(order_id: str, request: Request) -> Dict[str, str]:
-    order = orders.get(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    base_url = str(request.base_url).rstrip("/")
-    return {
-        "token": order.publicToken,
-        "url": f"{base_url}/view/{order.publicToken}",
-    }
 
 
 @app.get("/orders", response_model=Dict[str, Order])
@@ -462,6 +501,8 @@ def set_offer(order_id: str, offer: Offer):
     order = orders.get(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    if order.status.lower() == "anulowane":
+        raise HTTPException(status_code=400, detail="Order is cancelled")
     order.offer = offer
     summary = format_summary(order.data)
     offer_text = (
@@ -482,14 +523,6 @@ def set_offer(order_id: str, offer: Offer):
     orders[order_id] = order
     persist_store()
     return {"status": "ok"}
-
-
-@app.get("/public/orders/{public_token}", response_model=PublicOrder)
-def get_public_order(public_token: str) -> PublicOrder:
-    order = find_order_by_public_token(public_token)
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    return PublicOrder(id=order.id, createdAt=order.createdAt, data=order.data, offer=order.offer)
 
 
 @app.get("/chat/notifications")
@@ -526,8 +559,7 @@ async def whatsapp_meta_webhook(payload: Dict) -> Dict[str, str]:
                 st = sessions.get(from_id) or reset_session(from_id)
                 st["whatsapp"] = from_id
                 sessions[from_id] = st
-                env_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-                reply = process_chat_message(ChatRequest(sessionId=from_id, message=text), env_base)
+                reply = chat_message(ChatRequest(sessionId=from_id, message=text))
                 send_whatsapp_cloud_message(from_id, reply.reply)
     return {"status": "ok"}
 
@@ -546,8 +578,7 @@ def whatsapp_webhook(
     st = sessions.get(session_id) or reset_session(session_id)
     st["whatsapp"] = session_id
     sessions[session_id] = st
-    env_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-    reply = process_chat_message(ChatRequest(sessionId=session_id, message=Body), env_base)
+    reply = chat_message(ChatRequest(sessionId=session_id, message=Body))
     twiml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response><Message>"
@@ -568,17 +599,6 @@ def admin_page():
     if not admin_file.exists():
         raise HTTPException(status_code=404, detail="Admin page not found")
     return FileResponse(admin_file)
-
-
-@app.get("/view/{public_token}")
-def public_view(public_token: str):
-    """Serve read-only public view for a given order token."""
-    public_file = static_path / "public.html"
-    if not public_file.exists():
-        raise HTTPException(status_code=404, detail="Public page not found")
-    if not find_order_by_public_token(public_token):
-        raise HTTPException(status_code=404, detail="Order not found")
-    return FileResponse(public_file)
 
 
 app.mount("/", StaticFiles(directory=static_path, html=True), name="static")

@@ -17,6 +17,12 @@ function formatDate(value) {
   return date.toLocaleString("pl-PL");
 }
 
+function statusBadge(status) {
+  const norm = (status || "").toLowerCase();
+  if (norm === "anulowane") return "<span class='badge danger'>Anulowane</span>";
+  return "<span class='badge success'>Aktywne</span>";
+}
+
 function offerSnippet(offer) {
   if (!offer) return "<span class='muted'>Brak oferty</span>";
   let status = "<span class='badge warning'>Oczekuje akceptacji</span>";
@@ -46,12 +52,15 @@ function renderOrders(orders) {
       const d = order.data || {};
       const offer = order.offer;
       const shareUrl = `${window.location.origin}/view/${order.publicToken}`;
+       const isCancelled = (order.status || "").toLowerCase() === "anulowane";
+       const disabledAttr = isCancelled ? "disabled" : "";
       return `
         <div class="order-card">
           <div class="order-header">
             <div><span class="badge">ID</span> ${order.id}</div>
             <div class="muted">${formatDate(order.createdAt)}</div>
           </div>
+          <div class="order-meta">${statusBadge(order.status)}</div>
           <div class="order-route">${d.pickup || "-"} → ${d.delivery || "-"}</div>
           <div class="order-meta">
             <strong>${d.client_name || "Brak nazwy zleceniodawcy"}</strong>
@@ -71,24 +80,24 @@ function renderOrders(orders) {
               <li><strong>Wymagania:</strong> ${d.requirements || "-"}</li>
             </ul>
           </details>
-          <form class="offer-form" data-id="${order.id}">
+          <form class="offer-form" data-id="${order.id}" data-cancelled="${isCancelled}">
             <div class="offer-grid">
               <label>
                 Cena
-                <input type="text" name="price" placeholder="np. 2500 PLN" required />
+                <input type="text" name="price" placeholder="np. 2500 PLN" required ${disabledAttr}/>
               </label>
               <label>
                 Termin dostawy
-                <input type="text" name="eta" placeholder="np. 2026-03-01 10:00" required />
+                <input type="text" name="eta" placeholder="np. 2026-03-01 10:00" required ${disabledAttr}/>
               </label>
               <label>
                 Kierowca
-                <input type="text" name="driver" placeholder="Imię i nazwisko" required />
+                <input type="text" name="driver" placeholder="Imię i nazwisko" required ${disabledAttr}/>
               </label>
             </div>
             <div class="offer-actions">
-              <button type="submit">Złóż ofertę</button>
-              <span class="offer-status muted"></span>
+              <button type="submit" ${disabledAttr}>Złóż ofertę</button>
+              <span class="offer-status muted">${isCancelled ? "Zlecenie anulowane" : ""}</span>
             </div>
           </form>
         </div>
@@ -102,6 +111,8 @@ function renderOrders(orders) {
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const orderId = form.dataset.id;
+      const isCancelled = form.dataset.cancelled === "true";
+      if (isCancelled) return;
       const statusSpan = form.querySelector(".offer-status");
       statusSpan.textContent = "Wysyłam...";
 

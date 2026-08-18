@@ -368,7 +368,11 @@ def health() -> Dict[str, str]:
 
 
 @app.post("/chat/message", response_model=ChatReply)
-def chat_message(payload: ChatRequest, request: Optional[Request] = None) -> ChatReply:
+def chat_message(payload: ChatRequest, request: Request) -> ChatReply:
+    return handle_chat_message(payload, request)
+
+
+def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None) -> ChatReply:
     session_id = payload.sessionId.strip()
     message = payload.message.strip()
 
@@ -767,7 +771,7 @@ async def whatsapp_meta_webhook(payload: Dict) -> Dict[str, str]:
                 st = sessions.get(from_id) or reset_session(from_id)
                 st["whatsapp"] = from_id
                 sessions[from_id] = st
-                reply = chat_message(ChatRequest(sessionId=from_id, message=text))
+                reply = handle_chat_message(ChatRequest(sessionId=from_id, message=text))
                 send_whatsapp_cloud_message(from_id, reply.reply)
     return {"status": "ok"}
 
@@ -786,7 +790,7 @@ def whatsapp_webhook(
     st = sessions.get(session_id) or reset_session(session_id)
     st["whatsapp"] = session_id
     sessions[session_id] = st
-    reply = chat_message(ChatRequest(sessionId=session_id, message=Body))
+    reply = handle_chat_message(ChatRequest(sessionId=session_id, message=Body))
     twiml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response><Message>"

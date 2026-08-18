@@ -137,12 +137,20 @@ def test_admin_login_rejects_wrong_password(client: TestClient):
 
 
 def test_twiml_escapes_xml(client: TestClient):
-    first = client.post("/webhook/whatsapp", data={"Body": "nowe", "WaId": "48111"})
-    assert first.status_code == 200
-    response = client.post(
-        "/webhook/whatsapp",
-        data={"Body": "<script>alert(1)</script>", "WaId": "48111"},
-    )
-    assert response.status_code == 200
-    assert "<script>" not in response.text
-    assert "&lt;script&gt;" in response.text
+    steps = [
+        "nowe",
+        "<script>alert(1)</script>",
+        "Warszawa",
+        "Berlin",
+        "palety",
+        "2026-08-20 10:00",
+        "jan@acme.pl",
+        "brak",
+    ]
+    last = None
+    for body in steps:
+        last = client.post("/webhook/whatsapp", data={"Body": body, "WaId": "48111"})
+        assert last.status_code == 200
+    assert last is not None
+    assert "<script>" not in last.text
+    assert "&lt;script&gt;" in last.text

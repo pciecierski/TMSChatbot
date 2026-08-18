@@ -4,17 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Transport Chatbot</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260818d" />
   </head>
   <body>
     <div class="app">
       <header class="header">
         <div>
           <h1>Transport Chatbot</h1>
-          <p>Tworzenie zlecenia transportowego przez chat</p>
-        </div>
-        <div class="header-actions">
-          <a class="button secondary" href="/admin">Panel administratora</a>
+          <p class="subtitle">
+            Prezentujemy tutaj przykładowy chat z naszym automatycznym agentem w tle.
+            Agent może pełnić funkcję: spedytora, dyspozytora, administratora lub biura magazynu.
+            Agent wyjaśnia rozmówcy w jaki sposób może mu pomóc, a następnie prowadzi go krok po kroku
+            w stronę wykonania określonego działania. Agent może korzystać z danych źródłowych…
+            np. Informacje o awizacji lub w rezultacie interakcji z rozmówcą wykonać określone działanie
+            w systemie dziedzinowym np. TMS.
+          </p>
         </div>
       </header>
       <main>
@@ -43,6 +47,9 @@
           />
           <button type="submit">Wyślij</button>
         </form>
+        <div class="admin-link-row">
+          <a class="button secondary" href="/admin">Panel administratora</a>
+        </div>
       </main>
       <div class="footer">Product preview, Designed by dclog.pl</div>
     </div>

@@ -17,7 +17,7 @@ body {
 
 .header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
@@ -30,12 +30,14 @@ body {
 }
 
 header h1 {
-  margin: 0 0 4px;
+  margin: 0 0 8px;
 }
 
-.header p {
+.header p,
+.header .subtitle {
   margin: 0 0 16px;
   color: #555;
+  line-height: 1.55;
 }
 
 .messages {
@@ -290,6 +292,15 @@ button:disabled,
   text-align: center;
   color: #6b7280;
   font-size: 13px;
+}
+
+.admin-link-row {
+  margin-top: 16px;
+  display: flex;
+}
+
+.admin-link-row .button {
+  width: 100%;
 }
 
 .whatsapp-cta {

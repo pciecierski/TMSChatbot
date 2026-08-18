@@ -6,23 +6,34 @@ Szybki prototyp webowego chatbota do tworzenia zleceń transportowych.
 ```bash
 pip install -r requirements.txt
 cd server
-py -m uvicorn main:app --host 0.0.0.0 --port 8000
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 Otwórz http://localhost:8000 w przeglądarce.
 Panel admina (lista zleceń): http://localhost:8000/admin
 
+Hasło panelu admina pochodzi ze zmiennej `ADMIN_PASSWORD` (domyślnie `qqq` na potrzeby lokalnego podglądu). Logowanie ustawia ciasteczko sesji; lista zleceń i składanie ofert wymagają tej sesji.
+
+## Testy
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
 ## API
 - `POST /chat/message` – prosty kreator krok-po-kroku, pamięta sesję po `sessionId`.
-- `GET /orders` – podgląd zapisanych zleceń (in-memory).
-- `GET /orders/{id}` – szczegóły zlecenia.
-- `GET /orders/{id}/public-link` – zwraca token i URL publicznego podglądu.
+- `GET /orders` – podgląd zapisanych zleceń (wymaga sesji admina).
+- `GET /orders/{id}` – szczegóły zlecenia (wymaga sesji admina).
+- `GET /orders/{id}/public-link` – zwraca token i URL publicznego podglądu (wymaga sesji admina).
 - `GET /view/{publicToken}` / `GET /public/orders/{publicToken}` – publiczny, tylko do odczytu widok zlecenia (dane + oferta + status akceptacji).
-- `POST /orders/{id}/offer` – zapis oferty (cena, termin dostawy, kierowca) i powiadomienie do czatu.
+- `POST /orders/{id}/offer` – zapis oferty (cena, termin dostawy, kierowca) i powiadomienie do czatu (wymaga sesji admina).
+- `POST /admin/login` – logowanie do panelu (`{"password": "..."}`).
+- `GET /admin/session` / `POST /admin/logout` – sprawdzenie i zakończenie sesji admina.
 - `GET /chat/notifications?sessionId=...` – pobiera nowe powiadomienia (np. o ofercie) dla sesji czatu; po złożeniu oferty klient dostaje pytanie o akceptację, a odpowiedź zapisuje status na karcie zlecenia.
 - `GET /admin` – prosty widok listy wszystkich zleceń i formularz oferty.
 
 ## Trwałość danych
 - Zlecenia i oferty są zapisywane do pliku `server/data/orders.json`. Po restarcie serwera dane są wczytywane automatycznie.
+- Zapis jest atomowy (plik tymczasowy + zamiana), żeby ograniczyć ryzyko uszkodzenia przy restarcie.
 - Jeśli plik ulegnie uszkodzeniu, serwer wystartuje z pustym stanem (plik pozostanie do wglądu).
 
 ## Deploy na Railway (prosty)
@@ -30,7 +41,11 @@ Panel admina (lista zleceń): http://localhost:8000/admin
 2. W Railway utwórz projekt → Deploy from GitHub repo.
 3. Build: Nixpacks wykryje `requirements.txt` (z root) i zainstaluje zależności.
 4. Persistent data: w Railway dodaj Volume i zamontuj go w `/app/server/data`, by `orders.json` przetrwał restarty.
-5. Po deploy otrzymasz publiczny URL (np. https://…railway.app). Front statyczny jest serwowany z tego samego procesu.
+5. Ustaw zmienne:
+   - `ADMIN_PASSWORD` – hasło panelu administratora.
+   - `PUBLIC_BASE_URL` – publiczny URL aplikacji (np. `https://twoja-usluga.up.railway.app`), używany w linkach podglądu wysyłanych na czat/WhatsApp.
+   - `COOKIE_SECURE=true` – gdy aplikacja działa na HTTPS.
+6. Po deploy otrzymasz publiczny URL (np. https://…railway.app). Front statyczny jest serwowany z tego samego procesu.
 
 ## WhatsApp (Twilio)
 - Webhook: `POST /webhook/whatsapp` – przyjmuje pola `Body`, `WaId`/`From` (formularz x-www-form-urlencoded z Twilio) i odsyła TwiML z odpowiedzią chatbota.
@@ -47,6 +62,6 @@ Panel admina (lista zleceń): http://localhost:8000/admin
   - `WHATSAPP_PHONE_NUMBER_ID` – ID numeru WhatsApp (z konfiguracji Cloud API).
 
 ## Notatki
-- Stan i zlecenia trzymane w pamięci procesu; do demo/prototype OK.
+- Sesje czatu są trzymane w pamięci procesu; zlecenia są dodatkowo zapisywane do `orders.json`.
 - Static front (HTML/JS/CSS) serwowany z FastAPI (`/`).
 - Możesz zmienić pytania w `FIELDS` w `server/main.py` żeby dopasować do procesu.

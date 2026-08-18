@@ -1,15 +1,16 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+from xml.sax.saxutils import escape as xml_escape
+import os
 import uuid
 import json
-import os
+import secrets
 
-from fastapi import FastAPI, HTTPException, Form, Query
+from fastapi import FastAPI, HTTPException, Form, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 import httpx
 from pydantic import BaseModel
 
@@ -45,15 +46,50 @@ class Order(BaseModel):
     publicToken: str
 
 
+class AdminLogin(BaseModel):
+    password: str
+
+
 # In-memory stores (swap to Redis/DB later)
 orders: Dict[str, Order] = {}
 sessions: Dict[str, Dict] = {}
 session_notifications: Dict[str, List[str]] = {}
 acceptance_pending: Dict[str, str] = {}
+admin_sessions: set[str] = set()
 
 data_path = Path(__file__).parent / "data"
 data_path.mkdir(exist_ok=True)
 ORDERS_FILE = data_path / "orders.json"
+static_path = Path(__file__).parent / "static"
+static_path.mkdir(parents=True, exist_ok=True)
+
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "qqq")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "").lower() in {"1", "true", "yes"}
+
+NEW_COMMANDS = {"n", "nowe", "nowa", "nowy"}
+EDIT_COMMANDS = {"e", "edit", "edytuj", "edycja"}
+LIST_COMMANDS = {"l", "lista", "list"}
+RESET_COMMANDS = {"reset", "restart", "zacznij od nowa"}
+YES_COMMANDS = {"t", "tak", "y", "yes"}
+NO_COMMANDS = {"n", "nie", "no", "x"}
+DELETE_COMMANDS = {"usun", "usuń", "delete"}
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def parse_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def order_to_dict(order: Order) -> Dict:
@@ -85,11 +121,11 @@ def dict_to_order(data: Dict) -> Order:
             eta=offer_data.get("eta", ""),
             driver=offer_data.get("driver", ""),
             accepted=offer_data.get("accepted"),
-            acceptedAt=datetime.fromisoformat(offer_data["acceptedAt"]) if offer_data.get("acceptedAt") else None,
+            acceptedAt=parse_datetime(offer_data.get("acceptedAt")),
         )
     return Order(
         id=data["id"],
-        createdAt=datetime.fromisoformat(data["createdAt"]),
+        createdAt=parse_datetime(data["createdAt"]) or utcnow(),
         data=data.get("data", {}),
         createdBySession=data.get("createdBySession"),
         offer=offer_obj,
@@ -100,7 +136,9 @@ def dict_to_order(data: Dict) -> Order:
 
 def persist_store() -> None:
     payload = [order_to_dict(o) for o in orders.values()]
-    ORDERS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    tmp = ORDERS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    tmp.replace(ORDERS_FILE)
 
 
 def load_store() -> None:
@@ -116,11 +154,16 @@ def load_store() -> None:
         pass
 
 
-load_store()
+def reset_runtime_state() -> None:
+    """Used by tests to isolate cases."""
+    orders.clear()
+    sessions.clear()
+    session_notifications.clear()
+    acceptance_pending.clear()
+    admin_sessions.clear()
 
-WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+
+load_store()
 
 FIELDS = [
     ("client_name", "Podaj nazwę zleceniodawcy."),
@@ -133,6 +176,57 @@ FIELDS = [
 ]
 
 FIELD_KEYS = {key: prompt for key, prompt in FIELDS}
+FIELD_LABELS = {
+    "client_name": "Zleceniodawca",
+    "pickup": "Adres załadunku",
+    "delivery": "Adres rozładunku",
+    "cargo": "Ładunek",
+    "pickup_time": "Termin załadunku",
+    "contact": "Kontakt",
+    "requirements": "Wymagania specjalne",
+    "whatsapp": "WhatsApp",
+}
+FIELD_ALIASES = {
+    "zleceniodawca": "client_name",
+    "nazwa": "client_name",
+    "klient": "client_name",
+    "załadunek": "pickup",
+    "zaladunek": "pickup",
+    "adres załadunku": "pickup",
+    "adres zaladunku": "pickup",
+    "rozładunek": "delivery",
+    "rozladunek": "delivery",
+    "adres rozładunku": "delivery",
+    "adres rozladunku": "delivery",
+    "ładunek": "cargo",
+    "ladunek": "cargo",
+    "termin": "pickup_time",
+    "termin załadunku": "pickup_time",
+    "termin zaladunku": "pickup_time",
+    "kontakt": "contact",
+    "wymagania": "requirements",
+    "wymagania specjalne": "requirements",
+}
+
+
+def field_label(key: str) -> str:
+    return FIELD_LABELS.get(key, key.replace("_", " ").capitalize())
+
+
+def field_options_text() -> str:
+    return ", ".join(f"{field_label(key)} [{key}]" for key, _ in FIELDS)
+
+
+def resolve_field_key(message: str) -> Optional[str]:
+    msg = message.lower().strip()
+    if msg in FIELD_KEYS:
+        return msg
+    if msg in FIELD_ALIASES:
+        return FIELD_ALIASES[msg]
+    for key, label in FIELD_LABELS.items():
+        if key in FIELD_KEYS and msg == label.lower():
+            return key
+    return None
 
 
 def reset_session(session_id: str) -> Dict:
@@ -149,7 +243,7 @@ def reset_session(session_id: str) -> Dict:
 
 
 def format_summary(fields: Dict[str, str]) -> str:
-    lines = [f"- {label.capitalize().replace('_', ' ')}: {value}" for label, value in fields.items()]
+    lines = [f"- {field_label(key)}: {value}" for key, value in fields.items()]
     return "\n".join(lines)
 
 
@@ -158,6 +252,21 @@ def initial_prompt() -> str:
         "Co chcesz zrobić? wpisz: 'nowe', 'edytuj' lub 'lista'. "
         "W dowolnej chwili możesz wpisać 'restart' i zacząć rozmowę od początku."
     )
+
+
+def public_view_url(token: str, request: Optional[Request] = None) -> str:
+    if PUBLIC_BASE_URL:
+        return f"{PUBLIC_BASE_URL}/view/{token}"
+    if request is not None:
+        return str(request.base_url).rstrip("/") + f"/view/{token}"
+    return f"/view/{token}"
+
+
+def find_order_by_public_token(token: str) -> Optional[Order]:
+    for order in orders.values():
+        if order.publicToken == token:
+            return order
+    return None
 
 
 def list_orders_by_client(client_query: str) -> str:
@@ -212,7 +321,37 @@ def send_whatsapp_cloud_message(to: str, body: str) -> None:
         pass
 
 
-app = FastAPI(title="Transport Chatbot API", version="0.1.0")
+def is_admin_authenticated(request: Request) -> bool:
+    token = request.cookies.get("admin_session")
+    return bool(token and token in admin_sessions)
+
+
+def password_matches(candidate: str, expected: str) -> bool:
+    candidate_bytes = candidate.encode("utf-8")
+    expected_bytes = expected.encode("utf-8")
+    if len(candidate_bytes) != len(expected_bytes):
+        return False
+    return secrets.compare_digest(candidate_bytes, expected_bytes)
+
+
+def require_admin(request: Request) -> None:
+    if not is_admin_authenticated(request):
+        raise HTTPException(status_code=401, detail="Admin authentication required")
+
+
+def set_admin_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key="admin_session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=COOKIE_SECURE,
+        max_age=60 * 60 * 12,
+        path="/",
+    )
+
+
+app = FastAPI(title="Transport Chatbot API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -229,7 +368,11 @@ def health() -> Dict[str, str]:
 
 
 @app.post("/chat/message", response_model=ChatReply)
-def chat_message(payload: ChatRequest) -> ChatReply:
+def chat_message(payload: ChatRequest, request: Request) -> ChatReply:
+    return handle_chat_message(payload, request)
+
+
+def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None) -> ChatReply:
     session_id = payload.sessionId.strip()
     message = payload.message.strip()
 
@@ -241,7 +384,7 @@ def chat_message(payload: ChatRequest) -> ChatReply:
         state = reset_session(session_id)
 
     # Allow manual reset
-    if message_lower in {"reset", "restart", "zacznij od nowa"}:
+    if message_lower in RESET_COMMANDS:
         state = reset_session(session_id)
         return ChatReply(reply=f"Sesja wyzerowana. {initial_prompt()}", nextField="choice")
 
@@ -249,7 +392,7 @@ def chat_message(payload: ChatRequest) -> ChatReply:
     pending_order = acceptance_pending.get(session_id) or state.get("pending_accept_order")
     if pending_order:
         # Allow user to bypass acceptance prompt with top-level commands
-        bypass_cmds = {"lista", "list", "l", "nowe", "n", "edytuj", "edit", "e"}
+        bypass_cmds = NEW_COMMANDS | EDIT_COMMANDS | LIST_COMMANDS
         if message_lower in bypass_cmds:
             acceptance_pending.pop(session_id, None)
             state = reset_session(session_id)
@@ -268,9 +411,9 @@ def chat_message(payload: ChatRequest) -> ChatReply:
             state = reset_session(session_id)
             return ChatReply(reply="Zlecenie jest anulowane. " + initial_prompt(), nextField="choice")
 
-        if message_lower.startswith(("t", "y")):
+        if message_lower in YES_COMMANDS:
             order.offer.accepted = True
-            order.offer.acceptedAt = datetime.utcnow()
+            order.offer.acceptedAt = utcnow()
             orders[order.id] = order
             persist_store()
             acceptance_pending.pop(session_id, None)
@@ -287,7 +430,7 @@ def chat_message(payload: ChatRequest) -> ChatReply:
                 done=True,
             )
 
-        if message_lower.startswith(("n", "x")):
+        if message_lower in NO_COMMANDS:
             order.offer.accepted = False
             orders[order.id] = order
             persist_store()
@@ -303,17 +446,17 @@ def chat_message(payload: ChatRequest) -> ChatReply:
         if not message or message_lower in {"start", "hej", "cześć", "czesc"}:
             return ChatReply(reply=initial_prompt(), nextField="choice")
 
-        if message_lower.startswith("n"):
+        if message_lower in NEW_COMMANDS:
             state["mode"] = "new"
             state["step"] = 0
             prompt = FIELDS[state["step"]][1]
             return ChatReply(reply=prompt, nextField=FIELDS[state["step"]][0])
 
-        if message_lower.startswith("e") or "zmien" in message_lower or "edyt" in message_lower:
+        if message_lower in EDIT_COMMANDS or "zmien" in message_lower or "edyt" in message_lower:
             state["mode"] = "edit_select_id"
             return ChatReply(reply="Podaj ID istniejącego zlecenia do edycji.", nextField="order_id")
 
-        if message_lower.startswith("l") or "lista" in message_lower or "list" in message_lower:
+        if message_lower in LIST_COMMANDS or "lista" in message_lower:
             state["mode"] = "list_client"
             return ChatReply(reply="Podaj nazwę zleceniodawcy, aby wyszukać jego zlecenia.", nextField="client_name")
 
@@ -344,7 +487,7 @@ def chat_message(payload: ChatRequest) -> ChatReply:
             return ChatReply(reply="Nie znalazłem zlecenia o tym ID. Podaj poprawne ID.", nextField="order_id")
         state["edit_order_id"] = message
         state["mode"] = "edit_choose_field"
-        options = ", ".join(FIELD_KEYS.keys())
+        options = field_options_text()
         summary = format_summary(order.data)
         return ChatReply(
             reply=(
@@ -360,19 +503,20 @@ def chat_message(payload: ChatRequest) -> ChatReply:
     # EDIT FLOW: choose field
     if state["mode"] == "edit_choose_field":
         field_key = message_lower.strip()
-        if field_key in {"usun", "usuń"}:
+        if field_key in DELETE_COMMANDS:
             state["mode"] = "delete_confirm"
             return ChatReply(
                 reply=f"Czy na pewno usunąć zlecenie {state['edit_order_id']}? (tak/nie)",
                 nextField="confirm_delete",
                 orderId=state["edit_order_id"],
             )
-        if field_key not in FIELD_KEYS:
-            options = ", ".join(FIELD_KEYS.keys())
+        resolved = resolve_field_key(field_key)
+        if not resolved:
+            options = field_options_text()
             return ChatReply(reply=f"Nie znam takiego pola. Wybierz jedno z: {options}", nextField="field")
-        state["edit_field"] = field_key
+        state["edit_field"] = resolved
         state["mode"] = "edit_new_value"
-        return ChatReply(reply=f"Podaj nową wartość dla '{field_key}':", nextField=field_key)
+        return ChatReply(reply=f"Podaj nową wartość dla '{field_label(resolved)}':", nextField=resolved)
 
     if state["mode"] == "delete_confirm":
         order_id = state.get("edit_order_id")
@@ -380,7 +524,7 @@ def chat_message(payload: ChatRequest) -> ChatReply:
         if not order_id or not order:
             state = reset_session(session_id)
             return ChatReply(reply="Zlecenie nie istnieje. Zacznij od nowa.", nextField="choice")
-        if message_lower.startswith(("t", "y")):
+        if message_lower in YES_COMMANDS:
             order.status = "Anulowane"
             for sid, oid in list(acceptance_pending.items()):
                 if oid == order_id:
@@ -394,9 +538,9 @@ def chat_message(payload: ChatRequest) -> ChatReply:
                 collected=order.data,
                 done=True,
             )
-        if message_lower.startswith(("n", "x")):
+        if message_lower in NO_COMMANDS:
             state["mode"] = "edit_choose_field"
-            options = ", ".join(FIELD_KEYS.keys())
+            options = field_options_text()
             return ChatReply(
                 reply=(
                     "Usunięcie anulowane. Które pole chcesz zmienić? "
@@ -432,23 +576,28 @@ def chat_message(payload: ChatRequest) -> ChatReply:
 
     # NEW FLOW: Confirmation step
     if state["mode"] == "new" and state["step"] == len(FIELDS):
-        if message_lower.startswith(("t", "y")):
+        if message_lower in YES_COMMANDS:
             if state.get("whatsapp") and "whatsapp" not in state["fields"]:
                 state["fields"]["whatsapp"] = state["whatsapp"]
             order_id = str(uuid.uuid4())[:8]
+            public_token = str(uuid.uuid4())
             orders[order_id] = Order(
                 id=order_id,
-                createdAt=datetime.utcnow(),
+                createdAt=utcnow(),
                 data=state["fields"].copy(),
                 createdBySession=session_id,
                 status="Aktywne",
-                publicToken=str(uuid.uuid4()),
+                publicToken=public_token,
             )
             persist_store()
             state["mode"] = "done"
-            reply_text = f"Zlecenie zapisane. ID: {order_id}"
+            view_url = public_view_url(public_token, request)
+            reply_text = (
+                f"Zlecenie zapisane. ID: {order_id}\n"
+                f"Link do podglądu: {view_url}"
+            )
             return ChatReply(reply=reply_text, done=True, orderId=order_id, collected=state["fields"])
-        if message_lower.startswith(("n", "x")):
+        if message_lower in NO_COMMANDS:
             state = reset_session(session_id)
             return ChatReply(reply=f"Odrzucono. {initial_prompt()}", nextField="choice")
 
@@ -483,8 +632,22 @@ def chat_message(payload: ChatRequest) -> ChatReply:
     return ChatReply(reply=initial_prompt(), nextField="choice")
 
 
+@app.get("/orders/{order_id}/public-link")
+def get_public_link(order_id: str, request: Request) -> Dict[str, str]:
+    require_admin(request)
+    order = orders.get(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return {
+        "orderId": order.id,
+        "publicToken": order.publicToken,
+        "url": public_view_url(order.publicToken, request),
+    }
+
+
 @app.get("/orders/{order_id}", response_model=Order)
-def get_order(order_id: str) -> Order:
+def get_order(order_id: str, request: Request) -> Order:
+    require_admin(request)
     order = orders.get(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -492,12 +655,14 @@ def get_order(order_id: str) -> Order:
 
 
 @app.get("/orders", response_model=Dict[str, Order])
-def list_orders() -> Dict[str, Order]:
+def list_orders(request: Request) -> Dict[str, Order]:
+    require_admin(request)
     return orders
 
 
 @app.post("/orders/{order_id}/offer")
-def set_offer(order_id: str, offer: Offer):
+def set_offer(order_id: str, offer: Offer, request: Request):
+    require_admin(request)
     order = orders.get(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -525,10 +690,57 @@ def set_offer(order_id: str, offer: Offer):
     return {"status": "ok"}
 
 
+@app.get("/public/orders/{public_token}")
+def get_public_order(public_token: str) -> Dict:
+    order = find_order_by_public_token(public_token)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    payload = order_to_dict(order)
+    payload.pop("createdBySession", None)
+    return payload
+
+
+@app.get("/view/{public_token}")
+def public_view_page(public_token: str):
+    public_file = static_path / "public.html"
+    if not public_file.exists():
+        raise HTTPException(status_code=404, detail="Public page not found")
+    if not find_order_by_public_token(public_token):
+        # Still serve the page so the frontend can show a friendly 404.
+        return FileResponse(public_file)
+    return FileResponse(public_file)
+
+
 @app.get("/chat/notifications")
 def get_notifications(sessionId: str) -> Dict[str, List[str]]:
     msgs = session_notifications.pop(sessionId, [])
     return {"messages": msgs}
+
+
+@app.post("/admin/login")
+def admin_login(payload: AdminLogin, response: Response) -> Dict[str, str]:
+    if not password_matches(payload.password, ADMIN_PASSWORD):
+        raise HTTPException(status_code=401, detail="Invalid password")
+    token = secrets.token_urlsafe(32)
+    admin_sessions.add(token)
+    set_admin_cookie(response, token)
+    return {"status": "ok"}
+
+
+@app.get("/admin/session")
+def admin_session(request: Request) -> Dict[str, bool]:
+    if not is_admin_authenticated(request):
+        raise HTTPException(status_code=401, detail="Admin authentication required")
+    return {"authenticated": True}
+
+
+@app.post("/admin/logout")
+def admin_logout(request: Request, response: Response) -> Dict[str, str]:
+    token = request.cookies.get("admin_session")
+    if token:
+        admin_sessions.discard(token)
+    response.delete_cookie("admin_session", path="/")
+    return {"status": "ok"}
 
 
 @app.get("/webhook/whatsapp/meta")
@@ -559,7 +771,7 @@ async def whatsapp_meta_webhook(payload: Dict) -> Dict[str, str]:
                 st = sessions.get(from_id) or reset_session(from_id)
                 st["whatsapp"] = from_id
                 sessions[from_id] = st
-                reply = chat_message(ChatRequest(sessionId=from_id, message=text))
+                reply = handle_chat_message(ChatRequest(sessionId=from_id, message=text))
                 send_whatsapp_cloud_message(from_id, reply.reply)
     return {"status": "ok"}
 
@@ -578,18 +790,14 @@ def whatsapp_webhook(
     st = sessions.get(session_id) or reset_session(session_id)
     st["whatsapp"] = session_id
     sessions[session_id] = st
-    reply = chat_message(ChatRequest(sessionId=session_id, message=Body))
+    reply = handle_chat_message(ChatRequest(sessionId=session_id, message=Body))
     twiml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response><Message>"
-        f"{reply.reply}"
+        f"{xml_escape(reply.reply)}"
         "</Message></Response>"
     )
     return PlainTextResponse(content=twiml, media_type="application/xml")
-
-
-static_path = Path(__file__).parent / "static"
-static_path.mkdir(parents=True, exist_ok=True)
 
 
 @app.get("/admin")

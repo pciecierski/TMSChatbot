@@ -2,6 +2,7 @@ const listEl = document.getElementById("orders-list");
 const countEl = document.getElementById("orders-count");
 const statusEl = document.getElementById("status-text");
 const refreshBtn = document.getElementById("refresh-btn");
+const logoutBtn = document.getElementById("logout-btn");
 const guardEl = document.getElementById("admin-guard");
 const guardForm = document.getElementById("admin-guard-form");
 const guardInput = document.getElementById("admin-guard-input");
@@ -9,6 +10,15 @@ const guardCancel = document.getElementById("admin-guard-cancel");
 const guardError = document.getElementById("admin-guard-error");
 
 const API_BASE = "";
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 function formatDate(value) {
   if (!value) return "-";
@@ -32,9 +42,9 @@ function offerSnippet(offer) {
     <div class="order-meta">
       <span class="badge">Oferta</span>
       ${status}
-      <span><strong>Cena:</strong> ${offer.price}</span>
-      <span><strong>Dostawa:</strong> ${offer.eta}</span>
-      <span><strong>Kierowca:</strong> ${offer.driver}</span>
+      <span><strong>Cena:</strong> ${escapeHtml(offer.price)}</span>
+      <span><strong>Dostawa:</strong> ${escapeHtml(offer.eta)}</span>
+      <span><strong>Kierowca:</strong> ${escapeHtml(offer.driver)}</span>
     </div>
   `;
 }
@@ -52,35 +62,35 @@ function renderOrders(orders) {
       const d = order.data || {};
       const offer = order.offer;
       const shareUrl = `${window.location.origin}/view/${order.publicToken}`;
-       const isCancelled = (order.status || "").toLowerCase() === "anulowane";
-       const disabledAttr = isCancelled ? "disabled" : "";
+      const isCancelled = (order.status || "").toLowerCase() === "anulowane";
+      const disabledAttr = isCancelled ? "disabled" : "";
       return `
         <div class="order-card">
           <div class="order-header">
-            <div><span class="badge">ID</span> ${order.id}</div>
-            <div class="muted">${formatDate(order.createdAt)}</div>
+            <div><span class="badge">ID</span> ${escapeHtml(order.id)}</div>
+            <div class="muted">${escapeHtml(formatDate(order.createdAt))}</div>
           </div>
           <div class="order-meta">${statusBadge(order.status)}</div>
-          <div class="order-route">${d.pickup || "-"} → ${d.delivery || "-"}</div>
+          <div class="order-route">${escapeHtml(d.pickup || "-")} → ${escapeHtml(d.delivery || "-")}</div>
           <div class="order-meta">
-            <strong>${d.client_name || "Brak nazwy zleceniodawcy"}</strong>
+            <strong>${escapeHtml(d.client_name || "Brak nazwy zleceniodawcy")}</strong>
           </div>
           ${offerSnippet(offer)}
           <div class="share-row">
-            <input type="text" value="${shareUrl}" readonly />
-            <button type="button" class="button secondary copy-link" data-link="${shareUrl}">Kopiuj link podglądu</button>
+            <input type="text" value="${escapeHtml(shareUrl)}" readonly />
+            <button type="button" class="button secondary copy-link" data-link="${escapeHtml(shareUrl)}">Kopiuj link podglądu</button>
           </div>
           <details class="order-details">
             <summary>Szczegóły</summary>
             <ul>
-              <li><strong>WhatsApp:</strong> ${d.whatsapp || "-"}</li>
-              <li><strong>Kontakt:</strong> ${d.contact || "-"}</li>
-              <li><strong>Ładunek:</strong> ${d.cargo || "-"}</li>
-              <li><strong>Termin załadunku:</strong> ${d.pickup_time || "-"}</li>
-              <li><strong>Wymagania:</strong> ${d.requirements || "-"}</li>
+              <li><strong>WhatsApp:</strong> ${escapeHtml(d.whatsapp || "-")}</li>
+              <li><strong>Kontakt:</strong> ${escapeHtml(d.contact || "-")}</li>
+              <li><strong>Ładunek:</strong> ${escapeHtml(d.cargo || "-")}</li>
+              <li><strong>Termin załadunku:</strong> ${escapeHtml(d.pickup_time || "-")}</li>
+              <li><strong>Wymagania:</strong> ${escapeHtml(d.requirements || "-")}</li>
             </ul>
           </details>
-          <form class="offer-form" data-id="${order.id}" data-cancelled="${isCancelled}">
+          <form class="offer-form" data-id="${escapeHtml(order.id)}" data-cancelled="${isCancelled}">
             <div class="offer-grid">
               <label>
                 Cena
@@ -126,11 +136,16 @@ function renderOrders(orders) {
         const res = await fetch(`${API_BASE}/orders/${orderId}/offer`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
           body: JSON.stringify(body),
         });
+        if (res.status === 401) {
+          openGuard();
+          return;
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         statusSpan.textContent = "Oferta zapisana i wysłana do klienta.";
-        await loadOrders(); // refresh to show offer
+        await loadOrders();
       } catch (err) {
         console.error(err);
         statusSpan.textContent = "Błąd zapisu oferty.";
@@ -160,7 +175,12 @@ async function loadOrders() {
   statusEl.textContent = "Ładowanie...";
   refreshBtn.disabled = true;
   try {
-    const res = await fetch(`${API_BASE}/orders`);
+    const res = await fetch(`${API_BASE}/orders`, { credentials: "same-origin" });
+    if (res.status === 401) {
+      openGuard();
+      statusEl.textContent = "Wymagane logowanie.";
+      return false;
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const orders = Object.values(data || {}).sort(
@@ -168,10 +188,12 @@ async function loadOrders() {
     );
     renderOrders(orders);
     statusEl.textContent = `Ostatnie odświeżenie: ${new Date().toLocaleTimeString("pl-PL")}`;
+    return true;
   } catch (err) {
     console.error(err);
     statusEl.textContent = "Błąd podczas ładowania listy.";
     listEl.innerHTML = "<p class='empty'>Nie udało się pobrać zleceń.</p>";
+    return false;
   } finally {
     refreshBtn.disabled = false;
   }
@@ -179,15 +201,24 @@ async function loadOrders() {
 
 refreshBtn.addEventListener("click", loadOrders);
 
-loadOrders();
+if (logoutBtn) {
+  logoutBtn.addEventListener("click", async () => {
+    try {
+      await fetch(`${API_BASE}/admin/logout`, { method: "POST", credentials: "same-origin" });
+    } catch (err) {
+      console.error(err);
+    }
+    window.location.href = "/";
+  });
+}
 
 function openGuard() {
   if (!guardEl) return;
   guardEl.classList.remove("hidden");
   document.body.classList.add("modal-open");
-  guardError.textContent = "";
-  guardInput.value = "";
-  setTimeout(() => guardInput.focus(), 0);
+  if (guardError) guardError.textContent = "";
+  if (guardInput) guardInput.value = "";
+  setTimeout(() => guardInput && guardInput.focus(), 0);
 }
 
 function closeGuard() {
@@ -196,20 +227,48 @@ function closeGuard() {
   document.body.classList.remove("modal-open");
 }
 
-if (guardEl && guardForm && guardInput && guardCancel) {
-  openGuard();
+async function checkSession() {
+  try {
+    const res = await fetch(`${API_BASE}/admin/session`, { credentials: "same-origin" });
+    return res.ok;
+  } catch (err) {
+    console.error(err);
+    return false;
+  }
+}
 
-  guardForm.addEventListener("submit", (e) => {
+async function initAdmin() {
+  const authenticated = await checkSession();
+  if (authenticated) {
+    closeGuard();
+    await loadOrders();
+    return;
+  }
+  openGuard();
+}
+
+if (guardEl && guardForm && guardInput && guardCancel) {
+  guardForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const value = guardInput.value.trim();
-    if (value === "qqq") {
-      closeGuard();
-      if (guardEl && typeof guardEl.remove === "function") {
-        guardEl.remove(); // usuń całkiem, by nie blokowało niczego nawet przy błędnym stylu/cache
+    guardError.textContent = "";
+    try {
+      const res = await fetch(`${API_BASE}/admin/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ password: value }),
+      });
+      if (!res.ok) {
+        guardError.textContent = "Nieprawidłowe hasło.";
+        guardInput.focus();
+        return;
       }
-    } else {
-      guardError.textContent = "Nieprawidłowe hasło.";
-      guardInput.focus();
+      closeGuard();
+      await loadOrders();
+    } catch (err) {
+      console.error(err);
+      guardError.textContent = "Nie udało się zalogować.";
     }
   });
 
@@ -224,3 +283,5 @@ if (guardEl && guardForm && guardInput && guardCancel) {
     }
   });
 }
+
+initAdmin();

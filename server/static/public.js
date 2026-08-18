@@ -41,6 +41,15 @@ function offerStatus(offer) {
   return `<span class="badge warning">Oferta oczekuje na akceptację</span>`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function renderOffer(offer) {
   if (!offer) {
     return `<p class="muted">Oferta nie została jeszcze przygotowana.</p>`;
@@ -51,9 +60,9 @@ function renderOffer(offer) {
       ${offerStatus(offer)}
     </div>
     <ul class="offer-details">
-      <li><strong>Cena:</strong> ${offer.price}</li>
-      <li><strong>Planowany termin dostawy:</strong> ${offer.eta}</li>
-      <li><strong>Kierowca:</strong> ${offer.driver}</li>
+      <li><strong>Cena:</strong> ${escapeHtml(offer.price)}</li>
+      <li><strong>Planowany termin dostawy:</strong> ${escapeHtml(offer.eta)}</li>
+      <li><strong>Kierowca:</strong> ${escapeHtml(offer.driver)}</li>
     </ul>
   `;
 }
@@ -68,12 +77,13 @@ function showError(message) {
 function renderOrder(order) {
   orderIdEl.textContent = order.id;
   orderDateEl.textContent = formatDate(order.createdAt);
-  orderRouteEl.textContent = `${order.data.pickup || "-"} → ${order.data.delivery || "-"}`;
-  orderClientEl.textContent = order.data.client_name || "Brak nazwy zleceniodawcy";
-  orderContactEl.textContent = order.data.contact || "-";
-  orderCargoEl.textContent = order.data.cargo || "-";
-  orderPickupTimeEl.textContent = order.data.pickup_time || "-";
-  orderReqEl.textContent = order.data.requirements || "-";
+  const data = order.data || {};
+  orderRouteEl.textContent = `${data.pickup || "-"} → ${data.delivery || "-"}`;
+  orderClientEl.textContent = data.client_name || "Brak nazwy zleceniodawcy";
+  orderContactEl.textContent = data.contact || "-";
+  orderCargoEl.textContent = data.cargo || "-";
+  orderPickupTimeEl.textContent = data.pickup_time || "-";
+  orderReqEl.textContent = data.requirements || "-";
   offerBoxEl.innerHTML = renderOffer(order.offer);
 
   loadingEl.classList.add("hidden");

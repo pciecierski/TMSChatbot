@@ -215,6 +215,8 @@ if (logoutBtn) {
 function openGuard() {
   if (!guardEl) return;
   guardEl.classList.remove("hidden");
+  guardEl.removeAttribute("hidden");
+  guardEl.style.display = "flex";
   document.body.classList.add("modal-open");
   if (guardError) guardError.textContent = "";
   if (guardInput) guardInput.value = "";
@@ -224,6 +226,8 @@ function openGuard() {
 function closeGuard() {
   if (!guardEl) return;
   guardEl.classList.add("hidden");
+  guardEl.setAttribute("hidden", "");
+  guardEl.style.display = "none";
   document.body.classList.remove("modal-open");
 }
 

@@ -14,10 +14,28 @@ from fastapi.responses import FileResponse, PlainTextResponse
 import httpx
 from pydantic import BaseModel
 
+from conversations import (
+    append_message,
+    conversation_ids_for_visitor,
+    conversations as conversation_store,
+    create_conversation,
+    ensure_conversation,
+    get_conversation,
+    list_for_visitor,
+    maybe_update_title,
+    reopen_conversation,
+    reset_conversations,
+    save_agent_state,
+    serialize_conversation,
+)
+
 
 class ChatRequest(BaseModel):
-    sessionId: str
+    sessionId: str = ""
+    visitorId: Optional[str] = None
+    conversationId: Optional[str] = None
     message: str
+    userDisplay: Optional[str] = None
 
 
 class ChatButton(BaseModel):
@@ -32,6 +50,7 @@ class ChatReply(BaseModel):
     orderId: Optional[str] = None
     done: bool = False
     buttons: List[ChatButton] = []
+    conversationId: Optional[str] = None
 
 
 class Offer(BaseModel):
@@ -178,9 +197,18 @@ def reset_runtime_state() -> None:
     session_notifications.clear()
     acceptance_pending.clear()
     admin_sessions.clear()
+    reset_conversations()
+
+
+def restore_sessions_from_conversations() -> None:
+    for conv in conversation_store.values():
+        state = conv.get("agentState")
+        if state:
+            sessions[conv["id"]] = state
 
 
 load_store()
+restore_sessions_from_conversations()
 
 FIELDS = [
     ("client_name", "Podaj nazwę zleceniodawcy."),
@@ -316,7 +344,10 @@ def format_when(value: Optional[datetime]) -> str:
 
 
 def orders_for_session(session_id: str) -> List[Order]:
-    mine = [order for order in orders.values() if order.createdBySession == session_id]
+    conv = get_conversation(session_id)
+    visitor_id = conv["visitorId"] if conv else session_id
+    session_ids = conversation_ids_for_visitor(visitor_id)
+    mine = [order for order in orders.values() if order.createdBySession in session_ids]
     mine.sort(key=lambda order: order.createdAt, reverse=True)
     return mine
 
@@ -553,7 +584,50 @@ def health() -> Dict[str, str]:
 
 @app.post("/chat/message", response_model=ChatReply)
 def chat_message(payload: ChatRequest, request: Request) -> ChatReply:
-    return handle_chat_message(payload, request)
+    return run_chat(payload, request)
+
+
+class ConversationCreate(BaseModel):
+    visitorId: str
+
+
+def resolve_chat_identity(payload: ChatRequest) -> tuple[str, str]:
+    visitor_id = (payload.visitorId or payload.sessionId or "").strip()
+    conversation_id = (payload.conversationId or payload.sessionId or "").strip()
+    if not visitor_id:
+        visitor_id = str(uuid.uuid4())
+    if conversation_id:
+        existing = get_conversation(conversation_id)
+        if existing and existing.get("visitorId") == visitor_id:
+            if existing.get("agentState") and existing["id"] not in sessions:
+                sessions[existing["id"]] = existing["agentState"]
+            return visitor_id, existing["id"]
+    conv = ensure_conversation(visitor_id, conversation_id or None)
+    if conv.get("agentState") and conv["id"] not in sessions:
+        sessions[conv["id"]] = conv["agentState"]
+    return visitor_id, conv["id"]
+
+
+def run_chat(payload: ChatRequest, request: Optional[Request] = None) -> ChatReply:
+    visitor_id, conv_id = resolve_chat_identity(payload)
+    message = payload.message.strip()
+    user_display = (payload.userDisplay or message).strip()
+    skip_user = message.lower() in {"start", "hej", "cześć", "czesc", "menu", ""}
+    if message and not skip_user:
+        append_message(conv_id, "user", user_display)
+        maybe_update_title(conv_id, message)
+    routed = ChatRequest(
+        sessionId=conv_id,
+        visitorId=visitor_id,
+        conversationId=conv_id,
+        message=payload.message,
+    )
+    reply = handle_chat_message(routed, request)
+    buttons = [button.model_dump() for button in (reply.buttons or [])]
+    append_message(conv_id, "bot", reply.reply, buttons)
+    save_agent_state(conv_id, sessions.get(conv_id))
+    reply.conversationId = conv_id
+    return reply
 
 
 def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None) -> ChatReply:
@@ -949,9 +1023,45 @@ def public_view_page(public_token: str):
 
 
 @app.get("/chat/notifications")
-def get_notifications(sessionId: str) -> Dict[str, List[str]]:
-    msgs = session_notifications.pop(sessionId, [])
+def get_notifications(sessionId: str = "", conversationId: str = "") -> Dict[str, List[str]]:
+    key = (conversationId or sessionId).strip()
+    msgs = session_notifications.pop(key, [])
     return {"messages": msgs}
+
+
+@app.get("/chat/conversations")
+def api_list_conversations(visitorId: str) -> Dict[str, List[Dict]]:
+    items = [serialize_conversation(conv) for conv in list_for_visitor(visitorId.strip())]
+    return {"conversations": items}
+
+
+@app.post("/chat/conversations")
+def api_create_conversation(payload: ConversationCreate) -> Dict:
+    visitor_id = payload.visitorId.strip()
+    if not visitor_id:
+        raise HTTPException(status_code=400, detail="visitorId is required")
+    conv = create_conversation(visitor_id)
+    return serialize_conversation(conv, include_messages=True)
+
+
+@app.get("/chat/conversations/{conversation_id}")
+def api_get_conversation(conversation_id: str, visitorId: str) -> Dict:
+    conv = get_conversation(conversation_id)
+    if not conv or conv.get("visitorId") != visitorId.strip():
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv.get("agentState"):
+        sessions[conv["id"]] = conv["agentState"]
+    return serialize_conversation(conv, include_messages=True)
+
+
+@app.post("/chat/conversations/{conversation_id}/reopen")
+def api_reopen_conversation(conversation_id: str, payload: ConversationCreate) -> Dict:
+    conv = reopen_conversation(payload.visitorId.strip(), conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv.get("agentState"):
+        sessions[conv["id"]] = conv["agentState"]
+    return serialize_conversation(conv, include_messages=True)
 
 
 @app.post("/admin/login")
@@ -1008,7 +1118,7 @@ async def whatsapp_meta_webhook(payload: Dict) -> Dict[str, str]:
                 st = sessions.get(from_id) or reset_session(from_id)
                 st["whatsapp"] = from_id
                 sessions[from_id] = st
-                reply = handle_chat_message(ChatRequest(sessionId=from_id, message=text))
+                reply = run_chat(ChatRequest(sessionId=from_id, visitorId=from_id, message=text))
                 send_whatsapp_cloud_message(from_id, reply.reply)
     return {"status": "ok"}
 
@@ -1027,7 +1137,7 @@ def whatsapp_webhook(
     st = sessions.get(session_id) or reset_session(session_id)
     st["whatsapp"] = session_id
     sessions[session_id] = st
-    reply = handle_chat_message(ChatRequest(sessionId=session_id, message=Body))
+    reply = run_chat(ChatRequest(sessionId=session_id, visitorId=session_id, message=Body))
     twiml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response><Message>"

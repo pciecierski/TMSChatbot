@@ -20,7 +20,11 @@ pytest
 ```
 
 ## API
-- `POST /chat/message` – prosty kreator krok-po-kroku, pamięta sesję po `sessionId`.
+- `POST /chat/message` – kreator krok-po-kroku; przyjmuje `visitorId` + `conversationId` (albo legacy `sessionId`).
+- `GET /chat/conversations?visitorId=` – lista wątków (bieżące i archiwalne).
+- `POST /chat/conversations` – nowa rozmowa; poprzednia trafia do archiwum.
+- `GET /chat/conversations/{id}?visitorId=` – historia wiadomości wątku.
+- `POST /chat/conversations/{id}/reopen` – wznów archiwalny wątek.
 - `GET /orders` – podgląd zapisanych zleceń (wymaga sesji admina).
 - `GET /orders/{id}` – szczegóły zlecenia (wymaga sesji admina).
 - `GET /orders/{id}/public-link` – zwraca token i URL publicznego podglądu (wymaga sesji admina).
@@ -32,15 +36,16 @@ pytest
 - `GET /admin` – prosty widok listy wszystkich zleceń i formularz oferty.
 
 ## Trwałość danych
-- Zlecenia i oferty są zapisywane do pliku `server/data/orders.json`. Po restarcie serwera dane są wczytywane automatycznie.
-- Zapis jest atomowy (plik tymczasowy + zamiana), żeby ograniczyć ryzyko uszkodzenia przy restarcie.
-- Jeśli plik ulegnie uszkodzeniu, serwer wystartuje z pustym stanem (plik pozostanie do wglądu).
+- Zlecenia: `server/data/orders.json`.
+- Wątki i historia czatu: `server/data/conversations.json` (zapis automatyczny po każdej wiadomości).
+- Na Railway zamontuj Volume w `/app/server/data`, żeby oba pliki przetrwały restarty.
+- Postgres **nie jest wymagany** na tym etapie. Przyda się, gdy będzie wielu równoległych użytkowników, kilka instancji aplikacji albo wspólna historia web + WhatsApp w większej skali. Wtedy wątki z JSON da się przenieść 1:1 (visitor, conversation, messages).
 
 ## Deploy na Railway (prosty)
 1. W repo jest `railway.toml` z komendą startu: `cd server && uvicorn main:app --host 0.0.0.0 --port ${PORT}`.
 2. W Railway utwórz projekt → Deploy from GitHub repo.
 3. Build: Nixpacks wykryje `requirements.txt` (z root) i zainstaluje zależności.
-4. Persistent data: w Railway dodaj Volume i zamontuj go w `/app/server/data`, by `orders.json` przetrwał restarty.
+4. Persistent data: w Railway dodaj Volume i zamontuj go w `/app/server/data`, by `orders.json` i `conversations.json` przetrwały restarty.
 5. Ustaw zmienne:
    - `ADMIN_PASSWORD` – hasło panelu administratora.
    - `PUBLIC_BASE_URL` – publiczny URL aplikacji (np. `https://twoja-usluga.up.railway.app`), używany w linkach podglądu wysyłanych na czat/WhatsApp.
@@ -62,6 +67,6 @@ pytest
   - `WHATSAPP_PHONE_NUMBER_ID` – ID numeru WhatsApp (z konfiguracji Cloud API).
 
 ## Notatki
-- Sesje czatu są trzymane w pamięci procesu; zlecenia są dodatkowo zapisywane do `orders.json`.
+- Historia czatu jest zapisywana do `conversations.json`; stan agenta w wątku też, więc odświeżenie strony odtwarza dymki i krok rozmowy.
 - Static front (HTML/JS/CSS) serwowany z FastAPI (`/`).
 - Możesz zmienić pytania w `FIELDS` w `server/main.py` żeby dopasować do procesu.

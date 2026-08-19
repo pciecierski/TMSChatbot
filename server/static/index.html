@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Transport Chatbot</title>
-    <link rel="stylesheet" href="styles.css?v=20260819a" />
+    <link rel="stylesheet" href="styles.css?v=20260819b" />
   </head>
   <body>
     <div class="app">
@@ -22,37 +22,48 @@
         </div>
       </header>
       <main>
-        <div id="messages" class="messages"></div>
-        <div class="whatsapp-cta">
-          <div>
-            <div class="cta-title">Chcesz pisać na WhatsApp?</div>
-            <div class="cta-desc">Kliknij, a otworzymy rozmowę z naszym numerem.</div>
+        <div class="chat-shell">
+          <aside class="thread-pane">
+            <button id="new-chat-btn" type="button">Nowa rozmowa</button>
+            <div class="thread-section-title">Bieżąca</div>
+            <div id="thread-list-active" class="thread-list"></div>
+            <div class="thread-section-title">Archiwum</div>
+            <div id="thread-list-archive" class="thread-list"></div>
+          </aside>
+          <div class="chat-pane">
+            <div id="messages" class="messages"></div>
+            <div class="whatsapp-cta">
+              <div>
+                <div class="cta-title">Chcesz pisać na WhatsApp?</div>
+                <div class="cta-desc">Kliknij, a otworzymy rozmowę z naszym numerem.</div>
+              </div>
+              <a
+                class="button whatsapp-btn"
+                href="https://wa.me/15551585516"
+                data-wa-mobile="whatsapp://send?phone=15551585516"
+              >
+                Otwórz WhatsApp
+              </a>
+            </div>
+            <form id="chat-form">
+              <input
+                id="message-input"
+                name="message"
+                type="text"
+                placeholder="Napisz wiadomość albo wybierz akcję..."
+                autocomplete="off"
+                required
+              />
+              <button type="submit">Wyślij</button>
+            </form>
           </div>
-          <a
-            class="button whatsapp-btn"
-            href="https://wa.me/15551585516"
-            data-wa-mobile="whatsapp://send?phone=15551585516"
-          >
-            Otwórz WhatsApp
-          </a>
         </div>
-        <form id="chat-form">
-          <input
-            id="message-input"
-            name="message"
-            type="text"
-            placeholder="Napisz wiadomość albo wybierz akcję..."
-            autocomplete="off"
-            required
-          />
-          <button type="submit">Wyślij</button>
-        </form>
         <div class="admin-link-row">
           <a class="button secondary" href="/admin">Panel administratora</a>
         </div>
       </main>
       <div class="footer">Product preview, Designed by dclog.pl</div>
     </div>
-    <script src="app.js?v=20260819a"></script>
+    <script src="app.js?v=20260819b"></script>
   </body>
 </html>

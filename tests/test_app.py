@@ -10,9 +10,11 @@ sys.path.insert(0, str(ROOT / "server"))
 
 @pytest.fixture()
 def client(tmp_path):
+    import conversations as conv_mod
     import main as app_module
 
     app_module.ORDERS_FILE = tmp_path / "orders.json"
+    conv_mod.CONVERSATIONS_FILE = tmp_path / "conversations.json"
     app_module.reset_runtime_state()
     with TestClient(app_module.app) as test_client:
         yield test_client
@@ -173,3 +175,41 @@ def test_twiml_escapes_xml(client: TestClient):
     assert last is not None
     assert "<script>" not in last.text
     assert "&lt;script&gt;" in last.text
+
+
+def test_conversations_are_saved_and_archived(client: TestClient):
+    visitor = "visitor-1"
+    created = client.post("/chat/conversations", json={"visitorId": visitor})
+    assert created.status_code == 200
+    first_id = created.json()["id"]
+
+    chat_res = client.post(
+        "/chat/message",
+        json={"visitorId": visitor, "conversationId": first_id, "sessionId": first_id, "message": "nowe"},
+    )
+    assert chat_res.status_code == 200
+    assert chat_res.json()["conversationId"] == first_id
+
+    history = client.get(f"/chat/conversations/{first_id}", params={"visitorId": visitor})
+    assert history.status_code == 200
+    messages = history.json()["messages"]
+    assert any(msg["role"] == "user" and msg["text"] == "nowe" for msg in messages)
+    assert any(msg["role"] == "bot" for msg in messages)
+
+    second = client.post("/chat/conversations", json={"visitorId": visitor})
+    assert second.status_code == 200
+    second_id = second.json()["id"]
+    assert second_id != first_id
+
+    listed = client.get("/chat/conversations", params={"visitorId": visitor})
+    items = listed.json()["conversations"]
+    by_id = {item["id"]: item for item in items}
+    assert by_id[first_id]["archived"] is True
+    assert by_id[second_id]["archived"] is False
+
+    reopened = client.post(f"/chat/conversations/{first_id}/reopen", json={"visitorId": visitor})
+    assert reopened.status_code == 200
+    listed = client.get("/chat/conversations", params={"visitorId": visitor})
+    by_id = {item["id"]: item for item in listed.json()["conversations"]}
+    assert by_id[first_id]["archived"] is False
+    assert by_id[second_id]["archived"] is True

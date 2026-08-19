@@ -16,6 +16,7 @@ def client(tmp_path):
     app_module.ORDERS_FILE = tmp_path / "orders.json"
     conv_mod.CONVERSATIONS_FILE = tmp_path / "conversations.json"
     app_module.YARD_FILE = tmp_path / "yard_requests.json"
+    app_module.VISITS_FILE = tmp_path / "visits.json"
     app_module.reset_runtime_state()
     with TestClient(app_module.app) as test_client:
         yield test_client
@@ -29,6 +30,7 @@ def chat(client: TestClient, session_id: str, message: str):
 
 
 def create_order(client: TestClient, session_id: str = "sess-1", client_name: str = "ACME") -> dict:
+    chat(client, session_id, "nie")
     chat(client, session_id, "nowe")
     chat(client, session_id, client_name)
     chat(client, session_id, "Warszawa")
@@ -57,19 +59,20 @@ def test_health(client: TestClient):
     assert response.json()["status"] == "ok"
 
 
-def test_nie_does_not_start_new_order(client: TestClient):
+def test_greeting_asks_if_on_site(client: TestClient):
+    reply = chat(client, "boot", "start")
+    assert "placu" in reply["reply"].lower()
+    labels = [btn["label"] for btn in reply["buttons"]]
+    assert labels == ["Tak", "Nie"]
+
+
+def test_off_site_shows_spedytor_menu(client: TestClient):
     reply = chat(client, "s1", "nie")
     assert reply["nextField"] == "choice"
     assert "Krok 1/" not in reply["reply"]
     labels = [btn["label"] for btn in reply["buttons"]]
     assert "Nowe zlecenie" in labels
-
-
-def test_greeting_has_action_buttons(client: TestClient):
-    reply = chat(client, "boot", "start")
-    assert "spedytora" in reply["reply"]
-    labels = [btn["label"] for btn in reply["buttons"]]
-    assert labels == ["Nowe zlecenie", "Jestem na terenie parku", "Moje zlecenia", "Zmień zlecenie", "Restart"]
+    assert "Jestem na terenie parku" not in labels
 
 
 def test_create_order_and_public_view(client: TestClient):
@@ -160,6 +163,7 @@ def test_admin_login_rejects_wrong_password(client: TestClient):
 
 def test_twiml_escapes_xml(client: TestClient):
     steps = [
+        "nie",
         "nowe",
         "<script>alert(1)</script>",
         "Warszawa",
@@ -217,25 +221,31 @@ def test_conversations_are_saved_and_archived(client: TestClient):
 
 
 def test_yard_request_requires_onsite(client: TestClient):
-    first = chat(client, "drv-1", "park")
-    assert "terenie parku" in first["reply"].lower()
-    denied = chat(client, "drv-1", "nie")
+    first = chat(client, "drv-1", "start")
+    assert "placu" in first["reply"].lower()
+    denied_location = chat(client, "drv-1", "nie")
+    assert "Nowe zlecenie" in [btn["label"] for btn in denied_location["buttons"]]
+    denied = chat(client, "drv-1", "park")
     assert "tylko od kierowców" in denied["reply"]
     listed = client.get("/yard-requests")
     assert listed.status_code == 401
 
 
 def test_yard_pause_request_flow(client: TestClient):
-    chat(client, "drv-2", "park")
     chat(client, "drv-2", "tak")
     chat(client, "drv-2", "Jan Kowalski")
-    chat(client, "drv-2", "WZ 1234A / WZ 5678B")
+    menu = chat(client, "drv-2", "WZ 1234A / WZ 5678B")
+    labels = [btn["label"] for btn in menu["buttons"]]
+    assert "Sprawdzenie postępów wizyty" in labels
+    assert "Pauza / dodatkowy postój" in labels
     kind = chat(client, "drv-2", "pauza")
     assert "postój" in kind["reply"].lower() or "postoju" in kind["reply"].lower()
     chat(client, "drv-2", "45 min")
     done = chat(client, "drv-2", "tak")
     assert done["done"] is True
     assert "Zgłoszenie przyjęte" in done["reply"]
+    after = [btn["label"] for btn in done["buttons"]]
+    assert "Sprawdzenie postępów wizyty" in after
 
     assert admin_login(client).status_code == 200
     listed = client.get("/yard-requests")
@@ -248,3 +258,51 @@ def test_yard_pause_request_flow(client: TestClient):
     updated = client.post(f"/yard-requests/{req_id}/status", json={"status": "Przyjęte"})
     assert updated.status_code == 200
     assert client.get("/yard-requests").json()[req_id]["status"] == "Przyjęte"
+
+
+def test_on_site_stays_in_dispatcher_menu(client: TestClient):
+    chat(client, "onsite-1", "tak")
+    chat(client, "onsite-1", "Jan Kowalski")
+    menu = chat(client, "onsite-1", "WZ 1234A / WZ 5678B")
+    labels = [btn["label"] for btn in menu["buttons"]]
+    assert "Sprawdzenie postępów wizyty" in labels
+    assert "Nowe zlecenie" not in labels
+    blocked = chat(client, "onsite-1", "nowe")
+    assert "Krok 1/" not in blocked["reply"]
+    assert "dyspozytor" in blocked["reply"].lower()
+
+
+def test_visit_progress_lookup(client: TestClient):
+    chat(client, "vis-ok", "tak")
+    chat(client, "vis-ok", "Jan Kowalski")
+    chat(client, "vis-ok", "WZ 1234A / WZ 5678B")
+    confirm = chat(client, "vis-ok", "postep")
+    assert "Jan Kowalski" in confirm["reply"]
+    result = chat(client, "vis-ok", "tak")
+    assert "przypisany dok i przekazane do realizacji" in result["reply"]
+    assert "wizyta rozpoczęta" in result["reply"]
+    assert "przygotowane dokumenty" in result["reply"]
+    assert "aktualny etap" in result["reply"]
+
+
+def test_visit_progress_not_found(client: TestClient):
+    chat(client, "vis-miss", "tak")
+    chat(client, "vis-miss", "Nieznany Kierowca")
+    chat(client, "vis-miss", "XX 0000")
+    chat(client, "vis-miss", "postep")
+    result = chat(client, "vis-miss", "tak")
+    assert "nie znalazłem wizyty" in result["reply"].lower()
+
+
+def test_admin_can_advance_visit_stage(client: TestClient):
+    denied = client.get("/visits")
+    assert denied.status_code == 401
+    assert admin_login(client).status_code == 200
+    listed = client.get("/visits")
+    assert listed.status_code == 200
+    assert "vis-1" in listed.json()
+    assert listed.json()["vis-1"]["stage"] == "dok"
+    advanced = client.post("/visits/vis-1/stage", json={"advance": True})
+    assert advanced.status_code == 200
+    assert advanced.json()["stage"] == "zaladunek"
+    assert client.get("/visits").json()["vis-1"]["stage"] == "zaladunek"

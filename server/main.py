@@ -89,9 +89,23 @@ class YardStatusUpdate(BaseModel):
     status: str
 
 
+class Visit(BaseModel):
+    id: str
+    driver_name: str
+    plates: str
+    stage: str
+    updatedAt: datetime
+
+
+class VisitStageUpdate(BaseModel):
+    stage: Optional[str] = None
+    advance: bool = False
+
+
 # In-memory stores (swap to Redis/DB later)
 orders: Dict[str, Order] = {}
 yard_requests: Dict[str, YardRequest] = {}
+visits: Dict[str, Visit] = {}
 sessions: Dict[str, Dict] = {}
 session_notifications: Dict[str, List[str]] = {}
 acceptance_pending: Dict[str, str] = {}
@@ -101,6 +115,7 @@ data_path = Path(__file__).parent / "data"
 data_path.mkdir(exist_ok=True)
 ORDERS_FILE = data_path / "orders.json"
 YARD_FILE = data_path / "yard_requests.json"
+VISITS_FILE = data_path / "visits.json"
 static_path = Path(__file__).parent / "static"
 static_path.mkdir(parents=True, exist_ok=True)
 
@@ -139,6 +154,9 @@ NO_COMMANDS = {"n", "nie", "no", "x"}
 DELETE_COMMANDS = {"usun", "usuń", "delete", "anuluj zlecenie"}
 BACK_COMMANDS = {"powrót", "powrot", "wstecz", "menu"}
 YARD_BUSY_MODES = {
+    "location_check",
+    "dispatcher",
+    "visit_confirm",
     "yard_onsite",
     "yard_driver",
     "yard_plates",
@@ -189,6 +207,34 @@ YARD_KIND_ALIASES = {
     "zostawiam naczepę": "naczepa",
     "zostawiam naczepę": "naczepa",
 }
+POSTEP_COMMANDS = {
+    "postep",
+    "postęp",
+    "sprawdzenie",
+    "sprawdzenie postępów wizyty",
+    "sprawdzenie postepow wizyty",
+    "status wizyty",
+    "postępy",
+    "postepy",
+    "postępy wizyty",
+    "postepy wizyty",
+}
+LEAVE_SITE_COMMANDS = {
+    "leave_site",
+    "nie jestem już na placu",
+    "nie jestem juz na placu",
+    "nie jestem na placu",
+    "wyjazd",
+}
+VISIT_STAGES = [
+    ("rozpoczeta", "wizyta rozpoczęta"),
+    ("dokumenty", "potwierdzone dokumenty"),
+    ("dok", "przypisany dok i przekazane do realizacji"),
+    ("zaladunek", "zakończony załadunek/rozładunek"),
+    ("dokumenty_wyjazd", "przygotowane dokumenty"),
+]
+VISIT_STAGE_LABELS = {key: label for key, label in VISIT_STAGES}
+VISIT_STAGE_KEYS = [key for key, _ in VISIT_STAGES]
 
 
 def utcnow() -> datetime:
@@ -284,6 +330,63 @@ def persist_yard() -> None:
     tmp.replace(YARD_FILE)
 
 
+def visit_to_dict(item: Visit) -> Dict:
+    return {
+        "id": item.id,
+        "driver_name": item.driver_name,
+        "plates": item.plates,
+        "stage": item.stage,
+        "updatedAt": item.updatedAt.isoformat(),
+    }
+
+
+def dict_to_visit(data: Dict) -> Visit:
+    return Visit(
+        id=data["id"],
+        driver_name=data.get("driver_name", ""),
+        plates=data.get("plates", ""),
+        stage=data.get("stage", VISIT_STAGE_KEYS[0]),
+        updatedAt=parse_datetime(data.get("updatedAt")) or utcnow(),
+    )
+
+
+def persist_visits() -> None:
+    payload = [visit_to_dict(item) for item in visits.values()]
+    tmp = VISITS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    tmp.replace(VISITS_FILE)
+
+
+def seed_demo_visits() -> None:
+    visits.clear()
+    now = utcnow()
+    demo = [
+        Visit(
+            id="vis-1",
+            driver_name="Jan Kowalski",
+            plates="WZ 1234A / WZ 5678B",
+            stage="dok",
+            updatedAt=now,
+        ),
+        Visit(
+            id="vis-2",
+            driver_name="Anna Nowak",
+            plates="KR 9A111",
+            stage="dokumenty",
+            updatedAt=now,
+        ),
+        Visit(
+            id="vis-3",
+            driver_name="Piotr Zieliński",
+            plates="PO 2222T",
+            stage="zaladunek",
+            updatedAt=now,
+        ),
+    ]
+    for item in demo:
+        visits[item.id] = item
+
+
 def load_store() -> None:
     if ORDERS_FILE.exists():
         try:
@@ -301,17 +404,34 @@ def load_store() -> None:
                 yard_requests[req.id] = req
         except Exception:
             pass
+    visits.clear()
+    if VISITS_FILE.exists():
+        try:
+            loaded = json.loads(VISITS_FILE.read_text())
+            for item in loaded:
+                visit = dict_to_visit(item)
+                visits[visit.id] = visit
+        except Exception:
+            pass
+    if not visits:
+        seed_demo_visits()
+        try:
+            persist_visits()
+        except Exception:
+            pass
 
 
 def reset_runtime_state() -> None:
     """Used by tests to isolate cases."""
     orders.clear()
     yard_requests.clear()
+    visits.clear()
     sessions.clear()
     session_notifications.clear()
     acceptance_pending.clear()
     admin_sessions.clear()
     reset_conversations()
+    seed_demo_visits()
 
 
 def restore_sessions_from_conversations() -> None:
@@ -400,6 +520,8 @@ def reset_session(session_id: str) -> Dict:
         "listed_ids": [],
         "yard_kind": None,
         "yard_fields": {},
+        "on_site": None,
+        "pending_visit_check": False,
     }
     return sessions[session_id]
 
@@ -409,29 +531,50 @@ def format_summary(fields: Dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def initial_prompt() -> str:
+def location_prompt() -> str:
     return (
-        "Cześć. Jestem automatycznym agentem — mogę pełnić rolę spedytora, dyspozytora, "
-        "administratora albo biura magazynu.\n\n"
-        "Wyjaśnię, w czym mogę pomóc, a potem poprowadzę Cię krok po kroku. Umiem:\n"
+        "Cześć. Jestem automatycznym agentem — mogę pełnić rolę spedytora "
+        "albo dyspozytora parku.\n\n"
+        "Na początek: czy jesteś teraz na placu (terenie parku logistycznego)?"
+    )
+
+
+def spedytor_prompt() -> str:
+    return (
+        "Pomogę Ci jako spedytor. Umiem:\n"
         "- przyjąć nowe zlecenie transportowe,\n"
         "- pokazać Twoje zlecenia i zdarzenia (wycena, oferta, akceptacja, anulowanie),\n"
         "- poprawić dane albo anulować zlecenie,\n"
-        "- przyjąć decyzję o ofercie, gdy przyjdzie wycena,\n"
-        "- jako dyspozytor parkowy przyjąć zgłoszenie od kierowcy już na terenie "
-        "(zmiana godziny załadunku/rozładunku, pauza, pozostawienie naczepy).\n\n"
+        "- przyjąć decyzję o ofercie, gdy przyjdzie wycena.\n\n"
         "Wybierz akcję albo napisz, czego potrzebujesz."
     )
 
 
-def main_action_buttons() -> List[ChatButton]:
+def initial_prompt() -> str:
+    return location_prompt()
+
+
+def spedytor_action_buttons() -> List[ChatButton]:
     return [
         ChatButton(label="Nowe zlecenie", value="nowe"),
-        ChatButton(label="Jestem na terenie parku", value="park"),
         ChatButton(label="Moje zlecenia", value="lista"),
         ChatButton(label="Zmień zlecenie", value="edytuj"),
         ChatButton(label="Restart", value="restart"),
     ]
+
+
+def dispatcher_action_buttons() -> List[ChatButton]:
+    buttons = [ChatButton(label="Sprawdzenie postępów wizyty", value="postep")]
+    buttons.extend(ChatButton(label=label, value=key) for key, (label, _) in YARD_KINDS.items())
+    buttons.append(ChatButton(label="Nie jestem już na placu", value="leave_site"))
+    buttons.append(ChatButton(label="Restart", value="restart"))
+    return buttons
+
+
+def main_action_buttons(state: Optional[Dict] = None) -> List[ChatButton]:
+    if state and state.get("on_site"):
+        return dispatcher_action_buttons()
+    return spedytor_action_buttons()
 
 
 def yes_no_buttons() -> List[ChatButton]:
@@ -449,9 +592,7 @@ def field_buttons() -> List[ChatButton]:
 
 
 def yard_kind_buttons() -> List[ChatButton]:
-    buttons = [ChatButton(label=label, value=key) for key, (label, _) in YARD_KINDS.items()]
-    buttons.append(ChatButton(label="Anuluj", value="restart"))
-    return buttons
+    return dispatcher_action_buttons()
 
 
 def resolve_yard_kind(message: str) -> Optional[str]:
@@ -459,6 +600,61 @@ def resolve_yard_kind(message: str) -> Optional[str]:
     if msg in YARD_KINDS:
         return msg
     return YARD_KIND_ALIASES.get(msg)
+
+
+def normalize_plates(value: str) -> str:
+    return "".join(ch for ch in (value or "").upper() if ch.isalnum())
+
+
+def normalize_person_name(value: str) -> str:
+    return " ".join((value or "").lower().split())
+
+
+def find_visit(name: str, plates: str) -> Optional[Visit]:
+    plate_key = normalize_plates(plates)
+    if plate_key:
+        for item in visits.values():
+            visit_plates = normalize_plates(item.plates)
+            if visit_plates and (plate_key == visit_plates or plate_key in visit_plates or visit_plates in plate_key):
+                return item
+    name_key = normalize_person_name(name)
+    if name_key:
+        matches = [
+            item for item in visits.values() if normalize_person_name(item.driver_name) == name_key
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def format_visit_progress(visit: Visit) -> str:
+    current = visit.stage if visit.stage in VISIT_STAGE_KEYS else VISIT_STAGE_KEYS[0]
+    current_index = VISIT_STAGE_KEYS.index(current)
+    lines = ["Postęp wizyty:"]
+    for index, (_key, label) in enumerate(VISIT_STAGES):
+        if index < current_index:
+            mark = "✓"
+        elif index == current_index:
+            mark = "→"
+        else:
+            mark = "○"
+        suffix = "  (aktualny etap)" if index == current_index else ""
+        lines.append(f"{mark} {label}{suffix}")
+    return "\n".join(lines)
+
+
+def next_visit_stage(stage: str) -> str:
+    if stage not in VISIT_STAGE_KEYS:
+        return VISIT_STAGE_KEYS[0]
+    index = VISIT_STAGE_KEYS.index(stage)
+    return VISIT_STAGE_KEYS[min(index + 1, len(VISIT_STAGE_KEYS) - 1)]
+
+
+def visit_identity_summary(fields: Dict[str, str]) -> str:
+    return (
+        f"- Kierowca: {fields.get('driver_name', '-')}\n"
+        f"- Pojazd / naczepa: {fields.get('plates', '-')}"
+    )
 
 
 def yard_detail_key(kind: str) -> str:
@@ -500,8 +696,9 @@ def yard_event_line(item: YardRequest) -> str:
 
 
 def menu_reply(text: str, **kwargs) -> ChatReply:
+    state = kwargs.pop("state", None)
     kwargs.setdefault("nextField", "choice")
-    kwargs.setdefault("buttons", main_action_buttons())
+    kwargs.setdefault("buttons", main_action_buttons(state))
     return ChatReply(reply=text, **kwargs)
 
 
@@ -565,12 +762,12 @@ def order_events(order: Order) -> List[str]:
     return events
 
 
-def order_pick_buttons(listed: List[Order]) -> List[ChatButton]:
+def order_pick_buttons(listed: List[Order], state: Optional[Dict] = None) -> List[ChatButton]:
     buttons: List[ChatButton] = []
     for index, order in enumerate(listed[:6], start=1):
         client = (order.data or {}).get("client_name") or f"zlecenie {index}"
         buttons.append(ChatButton(label=f"{index}. {client}", value=str(index)))
-    buttons.extend(main_action_buttons())
+    buttons.extend(main_action_buttons(state))
     return buttons
 
 
@@ -587,7 +784,7 @@ def show_session_orders(session_id: str, intro: str) -> ChatReply:
                 "albo ID zlecenia, jeśli je masz."
             ),
             nextField="order_id",
-            buttons=main_action_buttons(),
+            buttons=main_action_buttons(state),
         )
 
     lines = [intro]
@@ -607,7 +804,7 @@ def show_session_orders(session_id: str, intro: str) -> ChatReply:
     return ChatReply(
         reply="\n".join(lines),
         nextField="order_id",
-        buttons=order_pick_buttons(listed),
+        buttons=order_pick_buttons(listed, state),
     )
 
 
@@ -814,6 +1011,160 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
     state = sessions.get(session_id) or reset_session(session_id)
     message_lower = message.lower()
 
+    def reply_menu(text: str, **kwargs) -> ChatReply:
+        return menu_reply(text, state=state, **kwargs)
+
+    def ask_location(prefix: str = "") -> ChatReply:
+        state["mode"] = "location_check"
+        state["on_site"] = None
+        text = location_prompt()
+        if prefix:
+            text = f"{prefix}\n\n{text}"
+        return ChatReply(
+            reply=text,
+            nextField="location_check",
+            buttons=yes_no_buttons(),
+        )
+
+    def enter_off_site(intro: Optional[str] = None) -> ChatReply:
+        identity = {
+            "driver_name": (state.get("yard_fields") or {}).get("driver_name", ""),
+            "plates": (state.get("yard_fields") or {}).get("plates", ""),
+        }
+        state.clear()
+        state.update(
+            {
+                "mode": None,
+                "step": 0,
+                "fields": {},
+                "edit_order_id": None,
+                "edit_field": None,
+                "pending_accept_order": None,
+                "whatsapp": None,
+                "listed_ids": [],
+                "yard_kind": None,
+                "yard_fields": identity,
+                "on_site": False,
+                "pending_visit_check": False,
+            }
+        )
+        sessions[session_id] = state
+        return reply_menu(intro or spedytor_prompt())
+
+    def dispatcher_menu(intro: Optional[str] = None, **kwargs) -> ChatReply:
+        state["on_site"] = True
+        state["mode"] = "dispatcher"
+        state["yard_kind"] = None
+        state["pending_visit_check"] = False
+        text = intro or (
+            "Jesteś na placu, więc obsługuję Cię jako dyspozytor parku.\n"
+            "Co chcesz zrobić?\n"
+            "- sprawdzenie postępów wizyty\n"
+            "- wcześniejszy lub późniejszy załadunek / rozładunek\n"
+            "- pauzę (dodatkowy postój)\n"
+            "- pozostawienie naczepy"
+        )
+        kwargs.setdefault("nextField", "dispatcher")
+        kwargs.setdefault("buttons", dispatcher_action_buttons())
+        return ChatReply(reply=text, **kwargs)
+
+    def enter_on_site() -> ChatReply:
+        state["on_site"] = True
+        fields = state.setdefault("yard_fields", {})
+        if not (fields.get("driver_name") or "").strip():
+            state["mode"] = "yard_driver"
+            return ChatReply(
+                reply=(
+                    "Jesteś na placu, więc obsługuję Cię jako dyspozytor parku.\n\n"
+                    "Podaj imię i nazwisko kierowcy."
+                ),
+                nextField="driver_name",
+                buttons=[ChatButton(label="Anuluj", value="restart")],
+            )
+        if not (fields.get("plates") or "").strip():
+            state["mode"] = "yard_plates"
+            return ChatReply(
+                reply="Podaj numer rejestracyjny ciągnika i naczepy.",
+                nextField="plates",
+                buttons=[ChatButton(label="Anuluj", value="restart")],
+            )
+        return dispatcher_menu()
+
+    def visit_progress_reply() -> ChatReply:
+        fields = state.get("yard_fields") or {}
+        visit = find_visit(fields.get("driver_name", ""), fields.get("plates", ""))
+        state["mode"] = "dispatcher"
+        state["pending_visit_check"] = False
+        identity = visit_identity_summary(fields)
+        if not visit:
+            return ChatReply(
+                reply=(
+                    "Sprawdziłem podane dane:\n"
+                    f"{identity}\n\n"
+                    "Nie znalazłem wizyty dla tego kierowcy i pojazdu. "
+                    "Nie zakładam nowej wizyty — popraw dane albo zgłoś się do biura bramy."
+                ),
+                nextField="dispatcher",
+                buttons=dispatcher_action_buttons(),
+            )
+        return ChatReply(
+            reply=(
+                "Dane kierowcy i pojazdu potwierdzone:\n"
+                f"{identity}\n\n"
+                f"{format_visit_progress(visit)}"
+            ),
+            nextField="dispatcher",
+            buttons=dispatcher_action_buttons(),
+        )
+
+    def start_visit_check() -> ChatReply:
+        fields = state.setdefault("yard_fields", {})
+        if not fields.get("driver_name") or not fields.get("plates"):
+            state["pending_visit_check"] = True
+            return enter_on_site()
+        state["mode"] = "visit_confirm"
+        state["pending_visit_check"] = True
+        return ChatReply(
+            reply=(
+                "Sprawdzenie postępów wizyty. Potwierdź dane kierowcy i pojazdu:\n"
+                f"{visit_identity_summary(fields)}\n\n"
+                "Czy to poprawne?"
+            ),
+            nextField="visit_confirm",
+            buttons=yes_no_buttons() + [ChatButton(label="Popraw dane", value="nie")],
+        )
+
+    def handle_dispatcher_choice() -> Optional[ChatReply]:
+        if message_lower in LEAVE_SITE_COMMANDS:
+            return enter_off_site(
+                "OK. Nie jesteś już na placu, więc pomogę Ci jako spedytor.\n\n" + spedytor_prompt()
+            )
+        if message_lower in POSTEP_COMMANDS:
+            return start_visit_check()
+        kind = resolve_yard_kind(message)
+        if kind:
+            label, prompt = YARD_KINDS[kind]
+            state["yard_kind"] = kind
+            state["yard_fields"]["kind"] = kind
+            state["yard_fields"]["kind_label"] = label
+            state["mode"] = "yard_detail"
+            return ChatReply(
+                reply=prompt,
+                nextField=yard_detail_key(kind),
+                buttons=[ChatButton(label="Anuluj", value="restart")],
+            )
+        if message_lower in NEW_COMMANDS | EDIT_COMMANDS | LIST_COMMANDS | BACK_COMMANDS:
+            return dispatcher_menu(
+                "Na placu obsługuję Cię jako dyspozytor. "
+                "Żeby złożyć lub zmienić zlecenie spedycyjne, wybierz „Nie jestem już na placu”."
+            )
+        return None
+
+    def after_identity_collected() -> ChatReply:
+        if state.get("pending_visit_check"):
+            return visit_progress_reply()
+        return dispatcher_menu()
+
     def start_new_order() -> ChatReply:
         state["mode"] = "new"
         state["step"] = 0
@@ -825,25 +1176,11 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             buttons=[ChatButton(label="Anuluj", value="restart")],
         )
 
-    def start_yard_flow() -> ChatReply:
-        state["mode"] = "yard_onsite"
-        state["yard_kind"] = None
-        state["yard_fields"] = {}
-        return ChatReply(
-            reply=(
-                "Jestem dyspozytorem parku. Te zgłoszenia przyjmuję tylko od kierowców, "
-                "którzy są już na terenie parku logistycznego.\n\n"
-                "Czy jesteś teraz na terenie parku?"
-            ),
-            nextField="yard_onsite",
-            buttons=yes_no_buttons() + [ChatButton(label="Anuluj", value="restart")],
-        )
-
     def begin_field_edit() -> ChatReply:
         order_id = state.get("edit_order_id")
         order = orders.get(order_id)
         if not order:
-            return menu_reply("Nie mam tego zlecenia. Wybierz inną akcję.")
+            return reply_menu("Nie mam tego zlecenia. Wybierz inną akcję.")
         state["mode"] = "edit_choose_field"
         options = field_options_text()
         return ChatReply(
@@ -857,14 +1194,23 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             buttons=field_buttons(),
         )
 
-    # If we already finished a flow, start fresh
+    # If we already finished a flow, keep location context
     if state.get("mode") == "done":
+        on_site = state.get("on_site")
+        yard_fields = dict(state.get("yard_fields") or {})
         state = reset_session(session_id)
+        state["on_site"] = on_site
+        if on_site:
+            state["yard_fields"] = {
+                "driver_name": yard_fields.get("driver_name", ""),
+                "plates": yard_fields.get("plates", ""),
+            }
+            state["mode"] = "dispatcher"
 
     # Allow manual reset
     if message_lower in RESET_COMMANDS:
         state = reset_session(session_id)
-        return menu_reply(f"Sesja wyzerowana.\n\n{initial_prompt()}")
+        return ask_location("Sesja wyzerowana.")
 
     # Pending offer acceptance flow override
     pending_order = acceptance_pending.get(session_id) or state.get("pending_accept_order")
@@ -872,7 +1218,9 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
         bypass_cmds = NEW_COMMANDS | EDIT_COMMANDS | LIST_COMMANDS | BACK_COMMANDS | YARD_COMMANDS
         if message_lower in bypass_cmds:
             acceptance_pending.pop(session_id, None)
+            on_site = state.get("on_site")
             state = reset_session(session_id)
+            state["on_site"] = on_site
         else:
             state["mode"] = "offer_confirm"
             state["pending_accept_order"] = pending_order
@@ -881,12 +1229,16 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
         order = orders.get(state["pending_accept_order"])
         if not order or not order.offer:
             acceptance_pending.pop(session_id, None)
+            on_site = state.get("on_site")
             state = reset_session(session_id)
-            return menu_reply("Oferta wygasła lub zlecenie nie istnieje.\n\n" + initial_prompt())
+            state["on_site"] = on_site
+            return reply_menu("Oferta wygasła lub zlecenie nie istnieje.\n\n" + spedytor_prompt())
         if order.status.lower() == "anulowane":
             acceptance_pending.pop(session_id, None)
+            on_site = state.get("on_site")
             state = reset_session(session_id)
-            return menu_reply("Zlecenie jest anulowane.\n\n" + initial_prompt())
+            state["on_site"] = on_site
+            return reply_menu("Zlecenie jest anulowane.\n\n" + spedytor_prompt())
 
         if message_lower in YES_COMMANDS:
             order.offer.accepted = True
@@ -896,7 +1248,7 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             acceptance_pending.pop(session_id, None)
             state["mode"] = "done"
             summary = format_summary(order.data)
-            return menu_reply(
+            return reply_menu(
                 (
                     f"Oferta zaakceptowana. ID: {order.id}\n"
                     f"{summary}\n"
@@ -913,7 +1265,7 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             persist_store()
             acceptance_pending.pop(session_id, None)
             state["mode"] = "done"
-            return menu_reply(
+            return reply_menu(
                 "Oferta odrzucona. Jeśli chcesz nową wycenę, otwórz listę zleceń albo popraw dane.",
                 orderId=order.id,
             )
@@ -924,42 +1276,81 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             buttons=yes_no_buttons(),
         )
 
+    on_site_answers = YES_COMMANDS | YARD_COMMANDS | {"plac", "na placu", "jestem na placu"}
+    if state.get("on_site") is None or state["mode"] == "location_check":
+        if message_lower in on_site_answers:
+            return enter_on_site()
+        if message_lower in NO_COMMANDS:
+            return enter_off_site()
+        if not message or message_lower in START_COMMANDS or state["mode"] in {None, "location_check"}:
+            return ask_location()
+
+    if state.get("on_site") and message_lower in LEAVE_SITE_COMMANDS:
+        return enter_off_site(
+            "OK. Nie jesteś już na placu, więc pomogę Ci jako spedytor.\n\n" + spedytor_prompt()
+        )
+
     if message_lower in LIST_COMMANDS | BACK_COMMANDS and state["mode"] not in ({"new", "edit_new_value"} | YARD_BUSY_MODES):
+        if state.get("on_site"):
+            return dispatcher_menu(
+                "Na placu obsługuję Cię jako dyspozytor. "
+                "Żeby zobaczyć zlecenia spedycyjne, wybierz „Nie jestem już na placu”."
+            )
         return show_session_orders(session_id, "Oto Twoje zlecenia i zdarzenia z tej rozmowy.")
 
     if message_lower in NEW_COMMANDS and state["mode"] not in ({"new", "offer_confirm"} | YARD_BUSY_MODES):
+        if state.get("on_site"):
+            return dispatcher_menu(
+                "Na placu obsługuję Cię jako dyspozytor. "
+                "Żeby złożyć zlecenie spedycyjne, wybierz „Nie jestem już na placu”."
+            )
         return start_new_order()
 
     if message_lower in YARD_COMMANDS and state["mode"] not in ({"new", "offer_confirm"} | YARD_BUSY_MODES):
-        return start_yard_flow()
+        if state.get("on_site"):
+            return dispatcher_menu()
+        return reply_menu(
+            "Te zgłoszenia przyjmuję tylko od kierowców już na terenie parku. "
+            "Jeśli właśnie wjechałeś na plac, wybierz Restart i potwierdź obecność."
+        )
 
     if message_lower in EDIT_COMMANDS and state["mode"] not in ({"new", "edit_new_value", "edit_choose_field", "order_card"} | YARD_BUSY_MODES):
+        if state.get("on_site"):
+            return dispatcher_menu(
+                "Na placu obsługuję Cię jako dyspozytor. "
+                "Żeby zmienić zlecenie spedycyjne, wybierz „Nie jestem już na placu”."
+            )
         return show_session_orders(session_id, "Które zlecenie chcesz zmienić?")
 
-    if state["mode"] == "yard_onsite":
+    if state["mode"] == "visit_confirm":
         if message_lower in YES_COMMANDS:
+            return visit_progress_reply()
+        if message_lower in NO_COMMANDS:
+            state["pending_visit_check"] = True
+            state["yard_fields"]["driver_name"] = ""
+            state["yard_fields"]["plates"] = ""
             state["mode"] = "yard_driver"
             return ChatReply(
                 reply="Podaj imię i nazwisko kierowcy.",
                 nextField="driver_name",
                 buttons=[ChatButton(label="Anuluj", value="restart")],
             )
-        if message_lower in NO_COMMANDS:
-            state = reset_session(session_id)
-            return menu_reply(
-                "Te zgłoszenia przyjmuję tylko od kierowców już na terenie parku. "
-                "Gdy będziesz na miejscu, wróć do opcji „Jestem na terenie parku”."
-            )
         return ChatReply(
-            reply="Potwierdź, czy jesteś teraz na terenie parku — tak albo nie.",
-            nextField="yard_onsite",
+            reply="Potwierdź dane kierowcy i pojazdu — tak albo nie.",
+            nextField="visit_confirm",
             buttons=yes_no_buttons(),
         )
+
+    if state["mode"] in {"dispatcher", "yard_kind"}:
+        handled = handle_dispatcher_choice()
+        if handled:
+            return handled
+        return dispatcher_menu("Wybierz jedną z opcji dyspozytora.")
 
     if state["mode"] == "yard_driver":
         if not message:
             return ChatReply(reply="Podaj imię i nazwisko kierowcy.", nextField="driver_name")
-        state["yard_fields"]["driver_name"] = message
+        state.setdefault("yard_fields", {})["driver_name"] = message
         state["mode"] = "yard_plates"
         return ChatReply(
             reply="Podaj numer rejestracyjny ciągnika i naczepy.",
@@ -970,38 +1361,8 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
     if state["mode"] == "yard_plates":
         if not message:
             return ChatReply(reply="Podaj numer rejestracyjny ciągnika i naczepy.", nextField="plates")
-        state["yard_fields"]["plates"] = message
-        state["mode"] = "yard_kind"
-        return ChatReply(
-            reply=(
-                "Co chcesz zgłosić dyspozytorowi?\n"
-                "- wcześniejszy lub późniejszy załadunek\n"
-                "- wcześniejszy lub późniejszy rozładunek\n"
-                "- pauzę (dodatkowy postój na terenie parku)\n"
-                "- pozostawienie naczepy (z terminem odbioru)"
-            ),
-            nextField="yard_kind",
-            buttons=yard_kind_buttons(),
-        )
-
-    if state["mode"] == "yard_kind":
-        kind = resolve_yard_kind(message)
-        if not kind:
-            return ChatReply(
-                reply="Wybierz jedno ze zgłoszeń z listy.",
-                nextField="yard_kind",
-                buttons=yard_kind_buttons(),
-            )
-        label, prompt = YARD_KINDS[kind]
-        state["yard_kind"] = kind
-        state["yard_fields"]["kind"] = kind
-        state["yard_fields"]["kind_label"] = label
-        state["mode"] = "yard_detail"
-        return ChatReply(
-            reply=prompt,
-            nextField=yard_detail_key(kind),
-            buttons=[ChatButton(label="Anuluj", value="restart")],
-        )
+        state.setdefault("yard_fields", {})["plates"] = message
+        return after_identity_collected()
 
     if state["mode"] == "yard_detail":
         if not message:
@@ -1024,6 +1385,15 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             kind = state.get("yard_kind") or ""
             label = state["yard_fields"].get("kind_label") or YARD_KINDS.get(kind, ("Zgłoszenie",))[0]
             request_id = str(uuid.uuid4())[:8]
+            payload = {
+                "driver_name": state["yard_fields"].get("driver_name", ""),
+                "plates": state["yard_fields"].get("plates", ""),
+                "kind": kind,
+                "kind_label": label,
+            }
+            for key in ("requested_time", "pause_until", "trailer_pickup_at"):
+                if state["yard_fields"].get(key):
+                    payload[key] = state["yard_fields"][key]
             yard_requests[request_id] = YardRequest(
                 id=request_id,
                 createdAt=utcnow(),
@@ -1031,23 +1401,32 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
                 kind=kind,
                 kindLabel=label,
                 status="Oczekuje",
-                data=state["yard_fields"].copy(),
+                data=payload,
             )
             persist_yard()
-            state["mode"] = "done"
-            summary = format_yard_summary(state["yard_fields"], label)
-            return menu_reply(
-                (
-                    f"Zgłoszenie przyjęte. ID: {request_id}\n"
-                    f"{summary}\n\n"
-                    "Dyspozytor parku zobaczy je w panelu. Status: oczekuje."
-                ),
-                collected=state["yard_fields"],
+            identity = {
+                "driver_name": payload.get("driver_name", ""),
+                "plates": payload.get("plates", ""),
+            }
+            state["on_site"] = True
+            state["yard_fields"] = identity
+            state["yard_kind"] = None
+            summary = format_yard_summary(payload, label)
+            return dispatcher_menu(
+                f"Zgłoszenie przyjęte. ID: {request_id}\n"
+                f"{summary}\n\n"
+                "Dyspozytor parku zobaczy je w panelu. Status: oczekuje.\n"
+                "Co jeszcze mogę zrobić na placu?",
+                collected=payload,
                 done=True,
             )
         if message_lower in NO_COMMANDS:
-            state = reset_session(session_id)
-            return menu_reply("Zgłoszenie anulowane.")
+            identity = {
+                "driver_name": (state.get("yard_fields") or {}).get("driver_name", ""),
+                "plates": (state.get("yard_fields") or {}).get("plates", ""),
+            }
+            state["yard_fields"] = identity
+            return dispatcher_menu("Zgłoszenie anulowane. Co chcesz zrobić na placu?")
         summary = format_yard_summary(state["yard_fields"], state["yard_fields"].get("kind_label", ""))
         return ChatReply(
             reply=f"Potwierdź wysłanie zgłoszenia — tak albo nie.\n{summary}",
@@ -1057,13 +1436,15 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
 
     # Ask for choice if no mode yet
     if state["mode"] is None:
+        if state.get("on_site"):
+            return dispatcher_menu()
         if not message or message_lower in START_COMMANDS:
-            return menu_reply(initial_prompt())
+            return reply_menu(spedytor_prompt())
 
         if "zmien" in message_lower or "edyt" in message_lower:
             return show_session_orders(session_id, "Które zlecenie chcesz zmienić?")
 
-        return menu_reply(
+        return reply_menu(
             "Nie rozpoznałem tej prośby. Mogę założyć zlecenie, pokazać listę i zdarzenia albo poprawić istniejące dane."
         )
 
@@ -1086,12 +1467,12 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             return ChatReply(
                 reply="\n".join(lines),
                 nextField="order_id",
-                buttons=order_pick_buttons(filtered),
+                buttons=order_pick_buttons(filtered, state),
             )
         return ChatReply(
             reply="Nie znalazłem takiego zlecenia. Wybierz numer z listy, podaj ID albo załóż nowe.",
             nextField="order_id",
-            buttons=order_pick_buttons(orders_for_session(session_id)),
+            buttons=order_pick_buttons(orders_for_session(session_id), state),
         )
 
     if state["mode"] == "order_card":
@@ -1142,7 +1523,7 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
         order = orders.get(order_id)
         if not order_id or not order:
             state = reset_session(session_id)
-            return menu_reply("Zlecenie nie istnieje. Zacznij od nowa.")
+            return reply_menu("Zlecenie nie istnieje. Zacznij od nowa.")
         if message_lower in YES_COMMANDS:
             order.status = "Anulowane"
             for sid, oid in list(acceptance_pending.items()):
@@ -1151,7 +1532,7 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             orders[order_id] = order
             persist_store()
             state["mode"] = "done"
-            return menu_reply(
+            return reply_menu(
                 f"Zlecenie {order_id} oznaczone jako „Anulowane”. Co dalej?",
                 orderId=order_id,
                 collected=order.data,
@@ -1173,13 +1554,13 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
         order = orders.get(order_id)
         if not order:
             state = reset_session(session_id)
-            return menu_reply("Sesja wygasła, zacznij od nowa.")
+            return reply_menu("Sesja wygasła, zacznij od nowa.")
         order.data[field_key] = message
         orders[order_id] = order
         persist_store()
         state["mode"] = "done"
         summary = format_summary(order.data)
-        return menu_reply(
+        return reply_menu(
             f"Zaktualizowano zlecenie {order_id}.\nNowe dane:\n{summary}\nCo dalej?",
             orderId=order_id,
             collected=order.data,
@@ -1209,10 +1590,11 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
                 f"Link do podglądu: {view_url}\n\n"
                 "Możesz teraz otworzyć listę zleceń albo dodać kolejne."
             )
-            return menu_reply(reply_text, done=True, orderId=order_id, collected=state["fields"])
+            return reply_menu(reply_text, done=True, orderId=order_id, collected=state["fields"])
         if message_lower in NO_COMMANDS:
             state = reset_session(session_id)
-            return menu_reply(f"Odrzucono.\n\n{initial_prompt()}")
+            state["on_site"] = False
+            return reply_menu(f"Odrzucono.\n\n{spedytor_prompt()}")
 
         summary = format_summary(state["fields"])
         return ChatReply(
@@ -1252,8 +1634,11 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
         )
 
     # Fallback: start over choice
-    state = reset_session(session_id)
-    return menu_reply(initial_prompt())
+    if state.get("on_site"):
+        return dispatcher_menu()
+    if state.get("on_site") is None:
+        return ask_location()
+    return reply_menu(spedytor_prompt())
 
 
 @app.get("/orders/{order_id}/public-link")
@@ -1303,6 +1688,32 @@ def set_yard_status(request_id: str, payload: YardStatusUpdate, request: Request
     yard_requests[request_id] = item
     persist_yard()
     return {"status": "ok"}
+
+
+@app.get("/visits", response_model=Dict[str, Visit])
+def list_visits(request: Request) -> Dict[str, Visit]:
+    require_admin(request)
+    return visits
+
+
+@app.post("/visits/{visit_id}/stage")
+def set_visit_stage(visit_id: str, payload: VisitStageUpdate, request: Request):
+    require_admin(request)
+    item = visits.get(visit_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Visit not found")
+    if payload.advance:
+        item.stage = next_visit_stage(item.stage)
+    elif payload.stage:
+        if payload.stage not in VISIT_STAGE_KEYS:
+            raise HTTPException(status_code=400, detail="Invalid stage")
+        item.stage = payload.stage
+    else:
+        raise HTTPException(status_code=400, detail="Provide stage or advance")
+    item.updatedAt = utcnow()
+    visits[visit_id] = item
+    persist_visits()
+    return visit_to_dict(item)
 
 
 @app.post("/orders/{order_id}/offer")

@@ -15,6 +15,11 @@ TITLE_HINTS = {
     "lista": "Moje zlecenia",
     "edytuj": "Zmiana zlecenia",
     "restart": "Restart rozmowy",
+    "postep": "Sprawdzenie wizyty",
+    "postęp": "Sprawdzenie wizyty",
+    "sprawdzenie": "Sprawdzenie wizyty",
+    "tak": "Na placu",
+    "nie": "Poza placem",
 }
 
 

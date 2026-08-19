@@ -9,7 +9,9 @@ CONVERSATIONS_FILE = Path(__file__).parent / "data" / "conversations.json"
 conversations: Dict[str, Dict] = {}
 
 TITLE_HINTS = {
-    "nowe": "Nowe zlecenie",
+    "park": "Zgłoszenie z parku",
+    "teren parku": "Zgłoszenie z parku",
+    "jestem na terenie parku": "Zgłoszenie z parku",
     "lista": "Moje zlecenia",
     "edytuj": "Zmiana zlecenia",
     "restart": "Restart rozmowy",

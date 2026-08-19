@@ -15,6 +15,7 @@ def client(tmp_path):
 
     app_module.ORDERS_FILE = tmp_path / "orders.json"
     conv_mod.CONVERSATIONS_FILE = tmp_path / "conversations.json"
+    app_module.YARD_FILE = tmp_path / "yard_requests.json"
     app_module.reset_runtime_state()
     with TestClient(app_module.app) as test_client:
         yield test_client
@@ -68,7 +69,7 @@ def test_greeting_has_action_buttons(client: TestClient):
     reply = chat(client, "boot", "start")
     assert "spedytora" in reply["reply"]
     labels = [btn["label"] for btn in reply["buttons"]]
-    assert labels == ["Nowe zlecenie", "Moje zlecenia", "Zmień zlecenie", "Restart"]
+    assert labels == ["Nowe zlecenie", "Jestem na terenie parku", "Moje zlecenia", "Zmień zlecenie", "Restart"]
 
 
 def test_create_order_and_public_view(client: TestClient):
@@ -213,3 +214,37 @@ def test_conversations_are_saved_and_archived(client: TestClient):
     by_id = {item["id"]: item for item in listed.json()["conversations"]}
     assert by_id[first_id]["archived"] is False
     assert by_id[second_id]["archived"] is True
+
+
+def test_yard_request_requires_onsite(client: TestClient):
+    first = chat(client, "drv-1", "park")
+    assert "terenie parku" in first["reply"].lower()
+    denied = chat(client, "drv-1", "nie")
+    assert "tylko od kierowców" in denied["reply"]
+    listed = client.get("/yard-requests")
+    assert listed.status_code == 401
+
+
+def test_yard_pause_request_flow(client: TestClient):
+    chat(client, "drv-2", "park")
+    chat(client, "drv-2", "tak")
+    chat(client, "drv-2", "Jan Kowalski")
+    chat(client, "drv-2", "WZ 1234A / WZ 5678B")
+    kind = chat(client, "drv-2", "pauza")
+    assert "postój" in kind["reply"].lower() or "postoju" in kind["reply"].lower()
+    chat(client, "drv-2", "45 min")
+    done = chat(client, "drv-2", "tak")
+    assert done["done"] is True
+    assert "Zgłoszenie przyjęte" in done["reply"]
+
+    assert admin_login(client).status_code == 200
+    listed = client.get("/yard-requests")
+    assert listed.status_code == 200
+    items = list(listed.json().values())
+    assert len(items) == 1
+    assert items[0]["kind"] == "pauza"
+    assert items[0]["data"]["driver_name"] == "Jan Kowalski"
+    req_id = items[0]["id"]
+    updated = client.post(f"/yard-requests/{req_id}/status", json={"status": "Przyjęte"})
+    assert updated.status_code == 200
+    assert client.get("/yard-requests").json()[req_id]["status"] == "Przyjęte"

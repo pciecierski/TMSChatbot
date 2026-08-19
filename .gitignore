@@ -11,3 +11,5 @@ Thumbs.db
 
 # App data
 server/data/orders.json
+server/data/conversations.json
+server/data/*.json.tmp

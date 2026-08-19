@@ -1,6 +1,8 @@
 const listEl = document.getElementById("orders-list");
 const yardListEl = document.getElementById("yard-list");
 const yardCountEl = document.getElementById("yard-count");
+const visitsListEl = document.getElementById("visits-list");
+const visitsCountEl = document.getElementById("visits-count");
 const countEl = document.getElementById("orders-count");
 const statusEl = document.getElementById("status-text");
 const refreshBtn = document.getElementById("refresh-btn");
@@ -260,6 +262,82 @@ async function loadYardRequests() {
   return true;
 }
 
+const VISIT_STAGE_LABELS = {
+  rozpoczeta: "wizyta rozpoczęta",
+  dokumenty: "potwierdzone dokumenty",
+  dok: "przypisany dok i przekazane do realizacji",
+  zaladunek: "zakończony załadunek/rozładunek",
+  dokumenty_wyjazd: "przygotowane dokumenty",
+};
+
+function visitStageLabel(stage) {
+  return VISIT_STAGE_LABELS[stage] || stage || "-";
+}
+
+function renderVisits(items) {
+  if (!visitsListEl || !visitsCountEl) return;
+  visitsCountEl.textContent = items.length;
+  if (!items.length) {
+    visitsListEl.innerHTML = "<p class='empty'>Brak wizyt na placu.</p>";
+    return;
+  }
+  visitsListEl.innerHTML = items
+    .map((item) => {
+      return `
+        <div class="order-card">
+          <div class="order-header">
+            <div><span class="badge">ID</span> ${escapeHtml(item.id)}</div>
+            <div class="muted">${escapeHtml(formatDate(item.updatedAt))}</div>
+          </div>
+          <div class="order-meta"><span class="badge warning">${escapeHtml(visitStageLabel(item.stage))}</span></div>
+          <div class="order-meta"><strong>${escapeHtml(item.driver_name || "Kierowca")}</strong></div>
+          <div class="order-route">${escapeHtml(item.plates || "-")}</div>
+          <div class="offer-actions">
+            <button type="button" class="visit-advance" data-id="${escapeHtml(item.id)}">Następny etap</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  visitsListEl.querySelectorAll(".visit-advance").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        const res = await fetch(`${API_BASE}/visits/${btn.dataset.id}/stage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ advance: true }),
+        });
+        if (res.status === 401) {
+          openGuard();
+          return;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await loadVisits();
+      } catch (err) {
+        console.error(err);
+      }
+    });
+  });
+}
+
+async function loadVisits() {
+  if (!visitsListEl) return true;
+  const res = await fetch(`${API_BASE}/visits`, { credentials: "same-origin" });
+  if (res.status === 401) {
+    openGuard();
+    return false;
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  const items = Object.values(data || {}).sort(
+    (a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0)
+  );
+  renderVisits(items);
+  return true;
+}
+
 async function loadOrders() {
   statusEl.textContent = "Ładowanie...";
   refreshBtn.disabled = true;
@@ -277,6 +355,7 @@ async function loadOrders() {
     );
     renderOrders(orders);
     await loadYardRequests();
+    await loadVisits();
     statusEl.textContent = `Ostatnie odświeżenie: ${new Date().toLocaleTimeString("pl-PL")}`;
     return true;
   } catch (err) {

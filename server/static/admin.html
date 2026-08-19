@@ -4,14 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Panel administratora - Transport Chatbot</title>
-    <link rel="stylesheet" href="styles.css?v=20260819c" />
+    <link rel="stylesheet" href="styles.css?v=20260819e" />
   </head>
   <body>
     <div class="app">
       <header class="header">
         <div>
           <h1>Panel administratora</h1>
-            <p>Lista zleceń i zgłoszeń z terenu parku</p>
+            <p>Lista zleceń, zgłoszeń z parku i postępów wizyt</p>
         </div>
         <div class="header-actions">
           <a class="button secondary" href="/">Wróć do czatu</a>
@@ -54,10 +54,19 @@
           </div>
           <div id="yard-list" class="orders-list"></div>
         </div>
+        <div class="panel" style="margin-top: 16px;">
+          <div class="order-header">
+            <h2>Wizyty na placu</h2>
+            <div class="order-meta">
+              <span class="badge" id="visits-count">0</span>
+            </div>
+          </div>
+          <div id="visits-list" class="orders-list"></div>
+        </div>
       </main>
       <div class="footer">Product preview, Designed by dclog.pl</div>
     </div>
 
-    <script src="admin.js?v=20260819c"></script>
+    <script src="admin.js?v=20260819e"></script>
   </body>
 </html>

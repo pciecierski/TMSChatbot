@@ -34,18 +34,20 @@ pytest
 - `GET /admin/session` / `POST /admin/logout` – sprawdzenie i zakończenie sesji admina.
 - `GET /chat/notifications?sessionId=...` – pobiera nowe powiadomienia (np. o ofercie) dla sesji czatu; po złożeniu oferty klient dostaje pytanie o akceptację, a odpowiedź zapisuje status na karcie zlecenia.
 - `GET /yard-requests` / `POST /yard-requests/{id}/status` – zgłoszenia kierowców z terenu parku (wymaga sesji admina).
+- `GET /visits` / `POST /visits/{id}/stage` – postępy wizyt na placu (wymaga sesji admina).
 
 ## Trwałość danych
 - Zlecenia: `server/data/orders.json`.
 - Zgłoszenia dyspozytora (park): `server/data/yard_requests.json`.
-- Na Railway zamontuj Volume w `/app/server/data`, żeby oba pliki przetrwały restarty.
+- Wizyty na placu (postępy): `server/data/visits.json`.
+- Na Railway zamontuj Volume w `/app/server/data`, żeby pliki przetrwały restarty.
 - Postgres **nie jest wymagany** na tym etapie. Przyda się, gdy będzie wielu równoległych użytkowników, kilka instancji aplikacji albo wspólna historia web + WhatsApp w większej skali. Wtedy wątki z JSON da się przenieść 1:1 (visitor, conversation, messages).
 
 ## Deploy na Railway (prosty)
 1. W repo jest `railway.toml` z komendą startu: `cd server && uvicorn main:app --host 0.0.0.0 --port ${PORT}`.
 2. W Railway utwórz projekt → Deploy from GitHub repo.
 3. Build: Nixpacks wykryje `requirements.txt` (z root) i zainstaluje zależności.
-4. Persistent data: w Railway dodaj Volume i zamontuj go w `/app/server/data`, by `orders.json`, `conversations.json` i `yard_requests.json` przetrwały restarty.
+4. Persistent data: w Railway dodaj Volume i zamontuj go w `/app/server/data`, by `orders.json`, `conversations.json`, `yard_requests.json` i `visits.json` przetrwały restarty.
 5. Ustaw zmienne:
    - `ADMIN_PASSWORD` – hasło panelu administratora.
    - `PUBLIC_BASE_URL` – publiczny URL aplikacji (np. `https://twoja-usluga.up.railway.app`), używany w linkach podglądu wysyłanych na czat/WhatsApp.
@@ -67,6 +69,7 @@ pytest
   - `WHATSAPP_PHONE_NUMBER_ID` – ID numeru WhatsApp (z konfiguracji Cloud API).
 
 ## Notatki
+- Rozmowa zaczyna się od pytania, czy rozmówca jest teraz na placu. „Tak” otwiera tylko menu dyspozytora (w tym sprawdzenie postępów wizyty); „Nie” otwiera ścieżkę spedytora.
 - Historia czatu jest zapisywana do `conversations.json`; stan agenta w wątku też, więc odświeżenie strony odtwarza dymki i krok rozmowy.
 - Static front (HTML/JS/CSS) serwowany z FastAPI (`/`).
 - Możesz zmienić pytania w `FIELDS` w `server/main.py` żeby dopasować do procesu.

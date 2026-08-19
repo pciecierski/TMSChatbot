@@ -33,11 +33,11 @@ pytest
 - `POST /admin/login` – logowanie do panelu (`{"password": "..."}`).
 - `GET /admin/session` / `POST /admin/logout` – sprawdzenie i zakończenie sesji admina.
 - `GET /chat/notifications?sessionId=...` – pobiera nowe powiadomienia (np. o ofercie) dla sesji czatu; po złożeniu oferty klient dostaje pytanie o akceptację, a odpowiedź zapisuje status na karcie zlecenia.
-- `GET /admin` – prosty widok listy wszystkich zleceń i formularz oferty.
+- `GET /yard-requests` / `POST /yard-requests/{id}/status` – zgłoszenia kierowców z terenu parku (wymaga sesji admina).
 
 ## Trwałość danych
 - Zlecenia: `server/data/orders.json`.
-- Wątki i historia czatu: `server/data/conversations.json` (zapis automatyczny po każdej wiadomości).
+- Zgłoszenia dyspozytora (park): `server/data/yard_requests.json`.
 - Na Railway zamontuj Volume w `/app/server/data`, żeby oba pliki przetrwały restarty.
 - Postgres **nie jest wymagany** na tym etapie. Przyda się, gdy będzie wielu równoległych użytkowników, kilka instancji aplikacji albo wspólna historia web + WhatsApp w większej skali. Wtedy wątki z JSON da się przenieść 1:1 (visitor, conversation, messages).
 
@@ -45,7 +45,7 @@ pytest
 1. W repo jest `railway.toml` z komendą startu: `cd server && uvicorn main:app --host 0.0.0.0 --port ${PORT}`.
 2. W Railway utwórz projekt → Deploy from GitHub repo.
 3. Build: Nixpacks wykryje `requirements.txt` (z root) i zainstaluje zależności.
-4. Persistent data: w Railway dodaj Volume i zamontuj go w `/app/server/data`, by `orders.json` i `conversations.json` przetrwały restarty.
+4. Persistent data: w Railway dodaj Volume i zamontuj go w `/app/server/data`, by `orders.json`, `conversations.json` i `yard_requests.json` przetrwały restarty.
 5. Ustaw zmienne:
    - `ADMIN_PASSWORD` – hasło panelu administratora.
    - `PUBLIC_BASE_URL` – publiczny URL aplikacji (np. `https://twoja-usluga.up.railway.app`), używany w linkach podglądu wysyłanych na czat/WhatsApp.

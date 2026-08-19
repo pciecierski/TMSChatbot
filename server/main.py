@@ -75,8 +75,23 @@ class AdminLogin(BaseModel):
     password: str
 
 
+class YardRequest(BaseModel):
+    id: str
+    createdAt: datetime
+    createdBySession: Optional[str] = None
+    kind: str
+    kindLabel: str
+    status: str = "Oczekuje"
+    data: Dict[str, str]
+
+
+class YardStatusUpdate(BaseModel):
+    status: str
+
+
 # In-memory stores (swap to Redis/DB later)
 orders: Dict[str, Order] = {}
+yard_requests: Dict[str, YardRequest] = {}
 sessions: Dict[str, Dict] = {}
 session_notifications: Dict[str, List[str]] = {}
 acceptance_pending: Dict[str, str] = {}
@@ -85,6 +100,7 @@ admin_sessions: set[str] = set()
 data_path = Path(__file__).parent / "data"
 data_path.mkdir(exist_ok=True)
 ORDERS_FILE = data_path / "orders.json"
+YARD_FILE = data_path / "yard_requests.json"
 static_path = Path(__file__).parent / "static"
 static_path.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +112,15 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "").lower() in {"1", "true", "yes"}
 
 NEW_COMMANDS = {"n", "nowe", "nowa", "nowy", "nowe zlecenie"}
+YARD_COMMANDS = {
+    "park",
+    "teren parku",
+    "jestem na terenie parku",
+    "na terenie parku",
+    "dyspozytor",
+    "kierowca",
+    "awizacja",
+}
 EDIT_COMMANDS = {"e", "edit", "edytuj", "edycja", "zmień zlecenie", "zmien zlecenie", "popraw"}
 LIST_COMMANDS = {
     "l",
@@ -113,6 +138,57 @@ YES_COMMANDS = {"t", "tak", "y", "yes"}
 NO_COMMANDS = {"n", "nie", "no", "x"}
 DELETE_COMMANDS = {"usun", "usuń", "delete", "anuluj zlecenie"}
 BACK_COMMANDS = {"powrót", "powrot", "wstecz", "menu"}
+YARD_BUSY_MODES = {
+    "yard_onsite",
+    "yard_driver",
+    "yard_plates",
+    "yard_kind",
+    "yard_detail",
+    "yard_confirm",
+}
+YARD_KINDS = {
+    "wczesniejszy_zaladunek": (
+        "Wcześniejszy załadunek",
+        "Podaj nowy, wcześniejszy termin załadunku (data i godzina).",
+    ),
+    "pozniejszy_zaladunek": (
+        "Późniejszy załadunek",
+        "Podaj nowy, późniejszy termin załadunku (data i godzina).",
+    ),
+    "wczesniejszy_rozladunek": (
+        "Wcześniejszy rozładunek",
+        "Podaj nowy, wcześniejszy termin rozładunku (data i godzina).",
+    ),
+    "pozniejszy_rozladunek": (
+        "Późniejszy rozładunek",
+        "Podaj nowy, późniejszy termin rozładunku (data i godzina).",
+    ),
+    "pauza": (
+        "Pauza / dodatkowy postój",
+        "Jak długo ma trwać dodatkowy postój na terenie parku? (np. 45 min albo do 14:30)",
+    ),
+    "naczepa": (
+        "Pozostawienie naczepy",
+        "Podaj datę i godzinę odbioru naczepy.",
+    ),
+}
+YARD_KIND_ALIASES = {
+    "wcześniejszy załadunek": "wczesniejszy_zaladunek",
+    "wczesniejszy zaladunek": "wczesniejszy_zaladunek",
+    "późniejszy załadunek": "pozniejszy_zaladunek",
+    "pozniejszy zaladunek": "pozniejszy_zaladunek",
+    "wcześniejszy rozładunek": "wczesniejszy_rozladunek",
+    "wczesniejszy rozladunek": "wczesniejszy_rozladunek",
+    "późniejszy rozładunek": "pozniejszy_rozladunek",
+    "pozniejszy rozladunek": "pozniejszy_rozladunek",
+    "pauza": "pauza",
+    "postój": "pauza",
+    "postoj": "pauza",
+    "naczepa": "naczepa",
+    "pozostawienie naczepy": "naczepa",
+    "zostawiam naczepę": "naczepa",
+    "zostawiam naczepę": "naczepa",
+}
 
 
 def utcnow() -> datetime:
@@ -177,22 +253,60 @@ def persist_store() -> None:
     tmp.replace(ORDERS_FILE)
 
 
+def yard_to_dict(item: YardRequest) -> Dict:
+    return {
+        "id": item.id,
+        "createdAt": item.createdAt.isoformat(),
+        "createdBySession": item.createdBySession,
+        "kind": item.kind,
+        "kindLabel": item.kindLabel,
+        "status": item.status,
+        "data": item.data,
+    }
+
+
+def dict_to_yard(data: Dict) -> YardRequest:
+    return YardRequest(
+        id=data["id"],
+        createdAt=parse_datetime(data.get("createdAt")) or utcnow(),
+        createdBySession=data.get("createdBySession"),
+        kind=data.get("kind", ""),
+        kindLabel=data.get("kindLabel", ""),
+        status=data.get("status", "Oczekuje"),
+        data=data.get("data", {}),
+    )
+
+
+def persist_yard() -> None:
+    payload = [yard_to_dict(item) for item in yard_requests.values()]
+    tmp = YARD_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    tmp.replace(YARD_FILE)
+
+
 def load_store() -> None:
-    if not ORDERS_FILE.exists():
-        return
-    try:
-        loaded = json.loads(ORDERS_FILE.read_text())
-        for item in loaded:
-            o = dict_to_order(item)
-            orders[o.id] = o
-    except Exception:
-        # If file is corrupted, start empty but keep file for inspection
-        pass
+    if ORDERS_FILE.exists():
+        try:
+            loaded = json.loads(ORDERS_FILE.read_text())
+            for item in loaded:
+                o = dict_to_order(item)
+                orders[o.id] = o
+        except Exception:
+            pass
+    if YARD_FILE.exists():
+        try:
+            loaded = json.loads(YARD_FILE.read_text())
+            for item in loaded:
+                req = dict_to_yard(item)
+                yard_requests[req.id] = req
+        except Exception:
+            pass
 
 
 def reset_runtime_state() -> None:
     """Used by tests to isolate cases."""
     orders.clear()
+    yard_requests.clear()
     sessions.clear()
     session_notifications.clear()
     acceptance_pending.clear()
@@ -284,6 +398,8 @@ def reset_session(session_id: str) -> Dict:
         "pending_accept_order": None,
         "whatsapp": None,
         "listed_ids": [],
+        "yard_kind": None,
+        "yard_fields": {},
     }
     return sessions[session_id]
 
@@ -301,7 +417,9 @@ def initial_prompt() -> str:
         "- przyjąć nowe zlecenie transportowe,\n"
         "- pokazać Twoje zlecenia i zdarzenia (wycena, oferta, akceptacja, anulowanie),\n"
         "- poprawić dane albo anulować zlecenie,\n"
-        "- przyjąć decyzję o ofercie, gdy przyjdzie wycena.\n\n"
+        "- przyjąć decyzję o ofercie, gdy przyjdzie wycena,\n"
+        "- jako dyspozytor parkowy przyjąć zgłoszenie od kierowcy już na terenie "
+        "(zmiana godziny załadunku/rozładunku, pauza, pozostawienie naczepy).\n\n"
         "Wybierz akcję albo napisz, czego potrzebujesz."
     )
 
@@ -309,6 +427,7 @@ def initial_prompt() -> str:
 def main_action_buttons() -> List[ChatButton]:
     return [
         ChatButton(label="Nowe zlecenie", value="nowe"),
+        ChatButton(label="Jestem na terenie parku", value="park"),
         ChatButton(label="Moje zlecenia", value="lista"),
         ChatButton(label="Zmień zlecenie", value="edytuj"),
         ChatButton(label="Restart", value="restart"),
@@ -327,6 +446,57 @@ def field_buttons() -> List[ChatButton]:
     buttons.append(ChatButton(label="Anuluj zlecenie", value="usuń"))
     buttons.append(ChatButton(label="Powrót", value="lista"))
     return buttons
+
+
+def yard_kind_buttons() -> List[ChatButton]:
+    buttons = [ChatButton(label=label, value=key) for key, (label, _) in YARD_KINDS.items()]
+    buttons.append(ChatButton(label="Anuluj", value="restart"))
+    return buttons
+
+
+def resolve_yard_kind(message: str) -> Optional[str]:
+    msg = message.lower().strip()
+    if msg in YARD_KINDS:
+        return msg
+    return YARD_KIND_ALIASES.get(msg)
+
+
+def yard_detail_key(kind: str) -> str:
+    if kind == "pauza":
+        return "pause_until"
+    if kind == "naczepa":
+        return "trailer_pickup_at"
+    return "requested_time"
+
+
+def format_yard_summary(fields: Dict[str, str], kind_label: str) -> str:
+    lines = [
+        f"- Typ zgłoszenia: {kind_label}",
+        f"- Kierowca: {fields.get('driver_name', '-')}",
+        f"- Pojazd / naczepa: {fields.get('plates', '-')}",
+    ]
+    if fields.get("requested_time"):
+        lines.append(f"- Nowy termin: {fields['requested_time']}")
+    if fields.get("pause_until"):
+        lines.append(f"- Czas postoju: {fields['pause_until']}")
+    if fields.get("trailer_pickup_at"):
+        lines.append(f"- Odbiór naczepy: {fields['trailer_pickup_at']}")
+    return "\n".join(lines)
+
+
+def yard_requests_for_session(session_id: str) -> List[YardRequest]:
+    conv = get_conversation(session_id)
+    visitor_id = conv["visitorId"] if conv else session_id
+    session_ids = conversation_ids_for_visitor(visitor_id)
+    mine = [item for item in yard_requests.values() if item.createdBySession in session_ids]
+    mine.sort(key=lambda item: item.createdAt, reverse=True)
+    return mine
+
+
+def yard_event_line(item: YardRequest) -> str:
+    when = format_when(item.createdAt)
+    driver = item.data.get("driver_name") or "kierowca"
+    return f"{when} — {driver}: {item.kindLabel} ({item.status})"
 
 
 def menu_reply(text: str, **kwargs) -> ChatReply:
@@ -409,23 +579,30 @@ def show_session_orders(session_id: str, intro: str) -> ChatReply:
     listed = orders_for_session(session_id)
     state["mode"] = "select_order"
     state["listed_ids"] = [order.id for order in listed]
-    if not listed:
+    if not listed and not yard_requests_for_session(session_id):
         return ChatReply(
             reply=(
                 f"{intro}\n\n"
-                "Nie mam jeszcze zleceń w tej rozmowie. Mogę założyć nowe albo przyjąć ID zlecenia, jeśli je masz."
+                "Nie mam jeszcze zleceń w tej rozmowie. Mogę założyć nowe, przyjąć zgłoszenie z terenu parku "
+                "albo ID zlecenia, jeśli je masz."
             ),
             nextField="order_id",
             buttons=main_action_buttons(),
         )
 
-    lines = [intro, "", "Twoje zlecenia:"]
-    lines.extend(order_choice_line(index, order) for index, order in enumerate(listed, start=1))
+    lines = [intro]
+    if listed:
+        lines.extend(["", "Twoje zlecenia:"])
+        lines.extend(order_choice_line(index, order) for index, order in enumerate(listed, start=1))
     lines.extend(["", "Ostatnie zdarzenia:"])
     events: List[str] = []
+    for item in yard_requests_for_session(session_id)[:6]:
+        events.append(yard_event_line(item))
     for order in listed:
         events.extend(order_events(order))
-    lines.extend(f"• {item}" for item in events[:8])
+    if not events:
+        events.append("Brak zdarzeń.")
+    lines.extend(f"• {item}" for item in events[:10])
     lines.extend(["", "Wybierz numer zlecenia albo inną akcję."])
     return ChatReply(
         reply="\n".join(lines),
@@ -648,6 +825,20 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             buttons=[ChatButton(label="Anuluj", value="restart")],
         )
 
+    def start_yard_flow() -> ChatReply:
+        state["mode"] = "yard_onsite"
+        state["yard_kind"] = None
+        state["yard_fields"] = {}
+        return ChatReply(
+            reply=(
+                "Jestem dyspozytorem parku. Te zgłoszenia przyjmuję tylko od kierowców, "
+                "którzy są już na terenie parku logistycznego.\n\n"
+                "Czy jesteś teraz na terenie parku?"
+            ),
+            nextField="yard_onsite",
+            buttons=yes_no_buttons() + [ChatButton(label="Anuluj", value="restart")],
+        )
+
     def begin_field_edit() -> ChatReply:
         order_id = state.get("edit_order_id")
         order = orders.get(order_id)
@@ -678,7 +869,7 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
     # Pending offer acceptance flow override
     pending_order = acceptance_pending.get(session_id) or state.get("pending_accept_order")
     if pending_order:
-        bypass_cmds = NEW_COMMANDS | EDIT_COMMANDS | LIST_COMMANDS | BACK_COMMANDS
+        bypass_cmds = NEW_COMMANDS | EDIT_COMMANDS | LIST_COMMANDS | BACK_COMMANDS | YARD_COMMANDS
         if message_lower in bypass_cmds:
             acceptance_pending.pop(session_id, None)
             state = reset_session(session_id)
@@ -733,14 +924,136 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             buttons=yes_no_buttons(),
         )
 
-    if message_lower in LIST_COMMANDS | BACK_COMMANDS and state["mode"] not in {"new", "edit_new_value"}:
+    if message_lower in LIST_COMMANDS | BACK_COMMANDS and state["mode"] not in ({"new", "edit_new_value"} | YARD_BUSY_MODES):
         return show_session_orders(session_id, "Oto Twoje zlecenia i zdarzenia z tej rozmowy.")
 
-    if message_lower in NEW_COMMANDS and state["mode"] not in {"new", "offer_confirm"}:
+    if message_lower in NEW_COMMANDS and state["mode"] not in ({"new", "offer_confirm"} | YARD_BUSY_MODES):
         return start_new_order()
 
-    if message_lower in EDIT_COMMANDS and state["mode"] not in {"new", "edit_new_value", "edit_choose_field", "order_card"}:
+    if message_lower in YARD_COMMANDS and state["mode"] not in ({"new", "offer_confirm"} | YARD_BUSY_MODES):
+        return start_yard_flow()
+
+    if message_lower in EDIT_COMMANDS and state["mode"] not in ({"new", "edit_new_value", "edit_choose_field", "order_card"} | YARD_BUSY_MODES):
         return show_session_orders(session_id, "Które zlecenie chcesz zmienić?")
+
+    if state["mode"] == "yard_onsite":
+        if message_lower in YES_COMMANDS:
+            state["mode"] = "yard_driver"
+            return ChatReply(
+                reply="Podaj imię i nazwisko kierowcy.",
+                nextField="driver_name",
+                buttons=[ChatButton(label="Anuluj", value="restart")],
+            )
+        if message_lower in NO_COMMANDS:
+            state = reset_session(session_id)
+            return menu_reply(
+                "Te zgłoszenia przyjmuję tylko od kierowców już na terenie parku. "
+                "Gdy będziesz na miejscu, wróć do opcji „Jestem na terenie parku”."
+            )
+        return ChatReply(
+            reply="Potwierdź, czy jesteś teraz na terenie parku — tak albo nie.",
+            nextField="yard_onsite",
+            buttons=yes_no_buttons(),
+        )
+
+    if state["mode"] == "yard_driver":
+        if not message:
+            return ChatReply(reply="Podaj imię i nazwisko kierowcy.", nextField="driver_name")
+        state["yard_fields"]["driver_name"] = message
+        state["mode"] = "yard_plates"
+        return ChatReply(
+            reply="Podaj numer rejestracyjny ciągnika i naczepy.",
+            nextField="plates",
+            buttons=[ChatButton(label="Anuluj", value="restart")],
+        )
+
+    if state["mode"] == "yard_plates":
+        if not message:
+            return ChatReply(reply="Podaj numer rejestracyjny ciągnika i naczepy.", nextField="plates")
+        state["yard_fields"]["plates"] = message
+        state["mode"] = "yard_kind"
+        return ChatReply(
+            reply=(
+                "Co chcesz zgłosić dyspozytorowi?\n"
+                "- wcześniejszy lub późniejszy załadunek\n"
+                "- wcześniejszy lub późniejszy rozładunek\n"
+                "- pauzę (dodatkowy postój na terenie parku)\n"
+                "- pozostawienie naczepy (z terminem odbioru)"
+            ),
+            nextField="yard_kind",
+            buttons=yard_kind_buttons(),
+        )
+
+    if state["mode"] == "yard_kind":
+        kind = resolve_yard_kind(message)
+        if not kind:
+            return ChatReply(
+                reply="Wybierz jedno ze zgłoszeń z listy.",
+                nextField="yard_kind",
+                buttons=yard_kind_buttons(),
+            )
+        label, prompt = YARD_KINDS[kind]
+        state["yard_kind"] = kind
+        state["yard_fields"]["kind"] = kind
+        state["yard_fields"]["kind_label"] = label
+        state["mode"] = "yard_detail"
+        return ChatReply(
+            reply=prompt,
+            nextField=yard_detail_key(kind),
+            buttons=[ChatButton(label="Anuluj", value="restart")],
+        )
+
+    if state["mode"] == "yard_detail":
+        if not message:
+            kind = state.get("yard_kind")
+            prompt = YARD_KINDS.get(kind, ("", "Podaj szczegóły zgłoszenia."))[1]
+            return ChatReply(reply=prompt, nextField="yard_detail")
+        kind = state.get("yard_kind") or ""
+        state["yard_fields"][yard_detail_key(kind)] = message
+        state["mode"] = "yard_confirm"
+        summary = format_yard_summary(state["yard_fields"], state["yard_fields"].get("kind_label", ""))
+        return ChatReply(
+            reply=f"Podsumowanie zgłoszenia:\n{summary}\n\nWysłać to do dyspozytora?",
+            nextField="confirm",
+            collected=state["yard_fields"],
+            buttons=yes_no_buttons(),
+        )
+
+    if state["mode"] == "yard_confirm":
+        if message_lower in YES_COMMANDS:
+            kind = state.get("yard_kind") or ""
+            label = state["yard_fields"].get("kind_label") or YARD_KINDS.get(kind, ("Zgłoszenie",))[0]
+            request_id = str(uuid.uuid4())[:8]
+            yard_requests[request_id] = YardRequest(
+                id=request_id,
+                createdAt=utcnow(),
+                createdBySession=session_id,
+                kind=kind,
+                kindLabel=label,
+                status="Oczekuje",
+                data=state["yard_fields"].copy(),
+            )
+            persist_yard()
+            state["mode"] = "done"
+            summary = format_yard_summary(state["yard_fields"], label)
+            return menu_reply(
+                (
+                    f"Zgłoszenie przyjęte. ID: {request_id}\n"
+                    f"{summary}\n\n"
+                    "Dyspozytor parku zobaczy je w panelu. Status: oczekuje."
+                ),
+                collected=state["yard_fields"],
+                done=True,
+            )
+        if message_lower in NO_COMMANDS:
+            state = reset_session(session_id)
+            return menu_reply("Zgłoszenie anulowane.")
+        summary = format_yard_summary(state["yard_fields"], state["yard_fields"].get("kind_label", ""))
+        return ChatReply(
+            reply=f"Potwierdź wysłanie zgłoszenia — tak albo nie.\n{summary}",
+            nextField="confirm",
+            buttons=yes_no_buttons(),
+        )
 
     # Ask for choice if no mode yet
     if state["mode"] is None:
@@ -969,6 +1282,27 @@ def get_order(order_id: str, request: Request) -> Order:
 def list_orders(request: Request) -> Dict[str, Order]:
     require_admin(request)
     return orders
+
+
+@app.get("/yard-requests", response_model=Dict[str, YardRequest])
+def list_yard_requests(request: Request) -> Dict[str, YardRequest]:
+    require_admin(request)
+    return yard_requests
+
+
+@app.post("/yard-requests/{request_id}/status")
+def set_yard_status(request_id: str, payload: YardStatusUpdate, request: Request):
+    require_admin(request)
+    item = yard_requests.get(request_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Yard request not found")
+    status = payload.status.strip()
+    if status not in {"Oczekuje", "Przyjęte", "Odrzucone"}:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    item.status = status
+    yard_requests[request_id] = item
+    persist_yard()
+    return {"status": "ok"}
 
 
 @app.post("/orders/{order_id}/offer")

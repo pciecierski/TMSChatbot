@@ -59,6 +59,20 @@ def test_health(client: TestClient):
     assert response.json()["status"] == "ok"
 
 
+def test_pages_use_mobile_viewport(client: TestClient):
+    home = client.get("/")
+    assert home.status_code == 200
+    assert 'name="viewport"' in home.text
+    assert "width=device-width" in home.text
+    assert "viewport-fit=cover" in home.text
+    assert "styles.css?v=20260819f" in home.text
+
+    styles = client.get("/styles.css?v=20260819f")
+    assert styles.status_code == 200
+    assert "overflow-x: hidden" in styles.text
+    assert "min-width: 0" in styles.text
+
+
 def test_greeting_asks_if_on_site(client: TestClient):
     reply = chat(client, "boot", "start")
     assert "placu" in reply["reply"].lower()

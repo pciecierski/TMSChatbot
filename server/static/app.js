@@ -10,7 +10,6 @@ function generateSessionId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  // Fallback dla starszych przeglądarek
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
     const v = c === "x" ? r : (r & 0x3) | 0x8;
@@ -28,33 +27,80 @@ function getSessionId() {
 
 const sessionId = getSessionId();
 
+function clearActionButtons() {
+  messagesEl.querySelectorAll(".chat-actions").forEach((el) => el.remove());
+}
+
 function addMessage(text, sender = "bot") {
   const div = document.createElement("div");
   div.className = `bubble ${sender}`;
   div.textContent = text;
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
 }
 
-async function sendMessage(message) {
-  addMessage(message, "user");
+function renderActionButtons(buttons) {
+  clearActionButtons();
+  if (!buttons || !buttons.length) return;
+  const wrap = document.createElement("div");
+  wrap.className = "chat-actions";
+  buttons.forEach((btn) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chat-action";
+    button.textContent = btn.label;
+    button.addEventListener("click", () => {
+      sendMessage(btn.value, btn.label);
+    });
+    wrap.appendChild(button);
+  });
+  messagesEl.appendChild(wrap);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function setPlaceholder(nextField) {
+  const placeholders = {
+    client_name: "np. ACME Logistics",
+    pickup: "np. Warszawa, ul. Logistyczna 1",
+    delivery: "np. Berlin, Hafenstraße 12",
+    cargo: "np. 10 palet, 8 t",
+    pickup_time: "np. 2026-08-21 08:00",
+    contact: "np. +48 600 000 000",
+    requirements: "np. winda, ADR albo „brak”",
+    confirm: "tak albo nie",
+    confirm_offer: "tak albo nie",
+    confirm_delete: "tak albo nie",
+    order_id: "numer z listy albo ID",
+    field: "wybierz pole albo wpisz nazwę",
+    choice: "napisz wiadomość albo wybierz akcję",
+  };
+  inputEl.placeholder = placeholders[nextField] || "Napisz wiadomość albo wybierz akcję...";
+}
+
+async function postChat(message) {
+  const res = await fetch(`${API_BASE}/chat/message`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId, message }),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function sendMessage(message, displayText = message) {
+  addMessage(displayText, "user");
+  clearActionButtons();
   inputEl.value = "";
   inputEl.disabled = true;
 
   try {
-    const res = await fetch(`${API_BASE}/chat/message`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, message }),
-    });
-
-    if (!res.ok) {
-      addMessage("Błąd serwera, spróbuj ponownie.", "bot");
-      return;
-    }
-
-    const data = await res.json();
+    const data = await postChat(message);
     addMessage(data.reply, "bot");
+    renderActionButtons(data.buttons || []);
+    setPlaceholder(data.nextField);
   } catch (err) {
     addMessage("Nie udało się połączyć z API.", "bot");
     console.error(err);
@@ -71,27 +117,41 @@ formEl.addEventListener("submit", (e) => {
   sendMessage(message);
 });
 
-// Start conversation (bez wysyłania "start" od użytkownika)
-addMessage("Cześć! Pomogę Ci stworzyć zlecenie transportowe.");
-addMessage(
-  "Co chcesz zrobić? wpisz: 'nowe', 'edytuj' lub 'lista'. W dowolnej chwili możesz wpisać 'restart' i zacząć rozmowę od początku."
-);
+async function startConversation() {
+  try {
+    const data = await postChat("start");
+    addMessage(data.reply, "bot");
+    renderActionButtons(data.buttons || []);
+    setPlaceholder(data.nextField);
+  } catch (err) {
+    addMessage("Nie udało się połączyć z API.", "bot");
+    console.error(err);
+  }
+}
 
 async function pollNotifications() {
   try {
     const res = await fetch(`${API_BASE}/chat/notifications?sessionId=${encodeURIComponent(sessionId)}`);
     if (!res.ok) return;
     const data = await res.json();
-    (data.messages || []).forEach((msg) => addMessage(msg, "bot"));
+    const messages = data.messages || [];
+    if (!messages.length) return;
+    messages.forEach((msg) => addMessage(msg, "bot"));
+    renderActionButtons([
+      { label: "Tak", value: "tak" },
+      { label: "Nie", value: "nie" },
+      { label: "Moje zlecenia", value: "lista" },
+    ]);
+    setPlaceholder("confirm_offer");
   } catch (err) {
     console.error("poll error", err);
   }
 }
 
+startConversation();
 pollNotifications();
 setInterval(pollNotifications, NOTIF_INTERVAL_MS);
 
-// Na urządzeniach mobilnych użyj głębszego linku whatsapp://
 if (whatsappBtn) {
   const mobileHref = whatsappBtn.getAttribute("data-wa-mobile");
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);

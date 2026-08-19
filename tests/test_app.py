@@ -57,7 +57,16 @@ def test_health(client: TestClient):
 def test_nie_does_not_start_new_order(client: TestClient):
     reply = chat(client, "s1", "nie")
     assert reply["nextField"] == "choice"
-    assert "nowe" in reply["reply"]
+    assert "Krok 1/" not in reply["reply"]
+    labels = [btn["label"] for btn in reply["buttons"]]
+    assert "Nowe zlecenie" in labels
+
+
+def test_greeting_has_action_buttons(client: TestClient):
+    reply = chat(client, "boot", "start")
+    assert "spedytora" in reply["reply"]
+    labels = [btn["label"] for btn in reply["buttons"]]
+    assert labels == ["Nowe zlecenie", "Moje zlecenia", "Zmień zlecenie", "Restart"]
 
 
 def test_create_order_and_public_view(client: TestClient):
@@ -93,16 +102,26 @@ def test_create_order_and_public_view(client: TestClient):
 
 
 def test_edit_by_polish_label(client: TestClient):
-    created = create_order(client, "edit-sess")
-    order_id = created["orderId"]
-
+    create_order(client, "edit-sess")
+    listed = chat(client, "edit-sess", "edytuj")
+    assert "1." in listed["reply"]
+    assert "ACME" in listed["reply"]
+    card = chat(client, "edit-sess", "1")
+    assert "Zleceniodawca" in card["reply"]
     chat(client, "edit-sess", "edytuj")
-    found = chat(client, "edit-sess", order_id)
-    assert "Zleceniodawca" in found["reply"]
     chat(client, "edit-sess", "ładunek")
     updated = chat(client, "edit-sess", "stal")
     assert "Zaktualizowano" in updated["reply"]
     assert "stal" in updated["reply"]
+
+
+def test_list_shows_orders_and_events(client: TestClient):
+    create_order(client, "list-sess", "ACME")
+    listed = chat(client, "list-sess", "lista")
+    assert "Twoje zlecenia:" in listed["reply"]
+    assert "Ostatnie zdarzenia:" in listed["reply"]
+    assert "czeka na wycenę" in listed["reply"]
+    assert any(btn["value"] == "1" for btn in listed["buttons"])
 
 
 def test_offer_requires_admin_and_can_be_accepted(client: TestClient):

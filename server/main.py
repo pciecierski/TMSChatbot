@@ -20,12 +20,18 @@ class ChatRequest(BaseModel):
     message: str
 
 
+class ChatButton(BaseModel):
+    label: str
+    value: str
+
+
 class ChatReply(BaseModel):
     reply: str
     nextField: Optional[str] = None
     collected: Dict[str, str] = {}
     orderId: Optional[str] = None
     done: bool = False
+    buttons: List[ChatButton] = []
 
 
 class Offer(BaseModel):
@@ -70,13 +76,24 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "qqq")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "").lower() in {"1", "true", "yes"}
 
-NEW_COMMANDS = {"n", "nowe", "nowa", "nowy"}
-EDIT_COMMANDS = {"e", "edit", "edytuj", "edycja"}
-LIST_COMMANDS = {"l", "lista", "list"}
+NEW_COMMANDS = {"n", "nowe", "nowa", "nowy", "nowe zlecenie"}
+EDIT_COMMANDS = {"e", "edit", "edytuj", "edycja", "zmień zlecenie", "zmien zlecenie", "popraw"}
+LIST_COMMANDS = {
+    "l",
+    "lista",
+    "list",
+    "moje zlecenia",
+    "zlecenia",
+    "status",
+    "zdarzenia",
+    "moje zdarzenia",
+}
 RESET_COMMANDS = {"reset", "restart", "zacznij od nowa"}
+START_COMMANDS = {"start", "hej", "cześć", "czesc", "menu", "pomoc"}
 YES_COMMANDS = {"t", "tak", "y", "yes"}
 NO_COMMANDS = {"n", "nie", "no", "x"}
-DELETE_COMMANDS = {"usun", "usuń", "delete"}
+DELETE_COMMANDS = {"usun", "usuń", "delete", "anuluj zlecenie"}
+BACK_COMMANDS = {"powrót", "powrot", "wstecz", "menu"}
 
 
 def utcnow() -> datetime:
@@ -231,13 +248,14 @@ def resolve_field_key(message: str) -> Optional[str]:
 
 def reset_session(session_id: str) -> Dict:
     sessions[session_id] = {
-        "mode": None,  # None | "new" | "edit_select_id" | "edit_choose_field" | "edit_new_value" | "done"
+        "mode": None,  # None | "new" | "select_order" | "edit_choose_field" | "edit_new_value" | "done"
         "step": 0,
         "fields": {},
         "edit_order_id": None,
         "edit_field": None,
         "pending_accept_order": None,
         "whatsapp": None,
+        "listed_ids": [],
     }
     return sessions[session_id]
 
@@ -249,9 +267,175 @@ def format_summary(fields: Dict[str, str]) -> str:
 
 def initial_prompt() -> str:
     return (
-        "Co chcesz zrobić? wpisz: 'nowe', 'edytuj' lub 'lista'. "
-        "W dowolnej chwili możesz wpisać 'restart' i zacząć rozmowę od początku."
+        "Cześć. Jestem automatycznym agentem — mogę pełnić rolę spedytora, dyspozytora, "
+        "administratora albo biura magazynu.\n\n"
+        "Wyjaśnię, w czym mogę pomóc, a potem poprowadzę Cię krok po kroku. Umiem:\n"
+        "- przyjąć nowe zlecenie transportowe,\n"
+        "- pokazać Twoje zlecenia i zdarzenia (wycena, oferta, akceptacja, anulowanie),\n"
+        "- poprawić dane albo anulować zlecenie,\n"
+        "- przyjąć decyzję o ofercie, gdy przyjdzie wycena.\n\n"
+        "Wybierz akcję albo napisz, czego potrzebujesz."
     )
+
+
+def main_action_buttons() -> List[ChatButton]:
+    return [
+        ChatButton(label="Nowe zlecenie", value="nowe"),
+        ChatButton(label="Moje zlecenia", value="lista"),
+        ChatButton(label="Zmień zlecenie", value="edytuj"),
+        ChatButton(label="Restart", value="restart"),
+    ]
+
+
+def yes_no_buttons() -> List[ChatButton]:
+    return [
+        ChatButton(label="Tak", value="tak"),
+        ChatButton(label="Nie", value="nie"),
+    ]
+
+
+def field_buttons() -> List[ChatButton]:
+    buttons = [ChatButton(label=field_label(key), value=key) for key, _ in FIELDS]
+    buttons.append(ChatButton(label="Anuluj zlecenie", value="usuń"))
+    buttons.append(ChatButton(label="Powrót", value="lista"))
+    return buttons
+
+
+def menu_reply(text: str, **kwargs) -> ChatReply:
+    kwargs.setdefault("nextField", "choice")
+    kwargs.setdefault("buttons", main_action_buttons())
+    return ChatReply(reply=text, **kwargs)
+
+
+def format_when(value: Optional[datetime]) -> str:
+    if not value:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.strftime("%d.%m %H:%M")
+
+
+def orders_for_session(session_id: str) -> List[Order]:
+    mine = [order for order in orders.values() if order.createdBySession == session_id]
+    mine.sort(key=lambda order: order.createdAt, reverse=True)
+    return mine
+
+
+def order_choice_line(index: int, order: Order) -> str:
+    data = order.data or {}
+    client = data.get("client_name") or "bez nazwy"
+    pickup = data.get("pickup") or "-"
+    delivery = data.get("delivery") or "-"
+    event = "czeka na wycenę"
+    if order.status.lower() == "anulowane":
+        event = "anulowane"
+    elif order.offer:
+        if order.offer.accepted is True:
+            event = "oferta zaakceptowana"
+        elif order.offer.accepted is False:
+            event = "oferta odrzucona"
+        else:
+            event = f"oferta {order.offer.price} oczekuje"
+    return f"{index}. {client} | {pickup} → {delivery} | {order.status} | {event}"
+
+
+def order_events(order: Order) -> List[str]:
+    data = order.data or {}
+    client = data.get("client_name") or "Zlecenie"
+    created = format_when(order.createdAt)
+    if created:
+        events = [f"{created} — {client}: zlecenie utworzone"]
+    else:
+        events = [f"{client}: zlecenie utworzone"]
+    if order.offer:
+        price = order.offer.price or "bez ceny"
+        if order.offer.accepted is True:
+            when = format_when(order.offer.acceptedAt)
+            prefix = f"{when} — " if when else ""
+            events.append(f"{prefix}{client}: oferta {price} zaakceptowana")
+        elif order.offer.accepted is False:
+            events.append(f"{client}: oferta {price} odrzucona")
+        else:
+            events.append(f"{client}: oferta {price}, oczekuje na akceptację")
+    elif order.status.lower() != "anulowane":
+        events.append(f"{client}: czeka na wycenę")
+    if order.status.lower() == "anulowane":
+        events.append(f"{client}: zlecenie anulowane")
+    return events
+
+
+def order_pick_buttons(listed: List[Order]) -> List[ChatButton]:
+    buttons: List[ChatButton] = []
+    for index, order in enumerate(listed[:6], start=1):
+        client = (order.data or {}).get("client_name") or f"zlecenie {index}"
+        buttons.append(ChatButton(label=f"{index}. {client}", value=str(index)))
+    buttons.extend(main_action_buttons())
+    return buttons
+
+
+def show_session_orders(session_id: str, intro: str) -> ChatReply:
+    state = sessions[session_id]
+    listed = orders_for_session(session_id)
+    state["mode"] = "select_order"
+    state["listed_ids"] = [order.id for order in listed]
+    if not listed:
+        return ChatReply(
+            reply=(
+                f"{intro}\n\n"
+                "Nie mam jeszcze zleceń w tej rozmowie. Mogę założyć nowe albo przyjąć ID zlecenia, jeśli je masz."
+            ),
+            nextField="order_id",
+            buttons=main_action_buttons(),
+        )
+
+    lines = [intro, "", "Twoje zlecenia:"]
+    lines.extend(order_choice_line(index, order) for index, order in enumerate(listed, start=1))
+    lines.extend(["", "Ostatnie zdarzenia:"])
+    events: List[str] = []
+    for order in listed:
+        events.extend(order_events(order))
+    lines.extend(f"• {item}" for item in events[:8])
+    lines.extend(["", "Wybierz numer zlecenia albo inną akcję."])
+    return ChatReply(
+        reply="\n".join(lines),
+        nextField="order_id",
+        buttons=order_pick_buttons(listed),
+    )
+
+
+def open_order_card(session_id: str, order: Order) -> ChatReply:
+    state = sessions[session_id]
+    state["edit_order_id"] = order.id
+    state["mode"] = "order_card"
+    summary = format_summary(order.data)
+    events = "\n".join(f"• {item}" for item in order_events(order))
+    return ChatReply(
+        reply=(
+            f"Zlecenie {order.id} ({order.status}):\n{summary}\n\n"
+            f"Zdarzenia:\n{events}\n\n"
+            "Co chcesz z tym zrobić?"
+        ),
+        nextField="field",
+        collected=order.data,
+        orderId=order.id,
+        buttons=[
+            ChatButton(label="Zmień dane", value="edytuj"),
+            ChatButton(label="Anuluj zlecenie", value="usuń"),
+            ChatButton(label="Powrót do listy", value="lista"),
+            ChatButton(label="Nowe zlecenie", value="nowe"),
+        ],
+    )
+
+
+def resolve_order_pick(message: str, listed_ids: List[str]) -> Optional[Order]:
+    text = message.strip()
+    if text in orders:
+        return orders[text]
+    if text.isdigit():
+        index = int(text) - 1
+        if 0 <= index < len(listed_ids):
+            return orders.get(listed_ids[index])
+    return None
 
 
 def public_view_url(token: str, request: Optional[Request] = None) -> str:
@@ -379,6 +563,35 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
     state = sessions.get(session_id) or reset_session(session_id)
     message_lower = message.lower()
 
+    def start_new_order() -> ChatReply:
+        state["mode"] = "new"
+        state["step"] = 0
+        state["fields"] = {}
+        key, prompt = FIELDS[0]
+        return ChatReply(
+            reply=f"Krok 1/{len(FIELDS)}. {prompt}",
+            nextField=key,
+            buttons=[ChatButton(label="Anuluj", value="restart")],
+        )
+
+    def begin_field_edit() -> ChatReply:
+        order_id = state.get("edit_order_id")
+        order = orders.get(order_id)
+        if not order:
+            return menu_reply("Nie mam tego zlecenia. Wybierz inną akcję.")
+        state["mode"] = "edit_choose_field"
+        options = field_options_text()
+        return ChatReply(
+            reply=(
+                f"Które pole chcesz zmienić?\n({options})\n"
+                "Możesz też anulować zlecenie."
+            ),
+            nextField="field",
+            collected=order.data,
+            orderId=order.id,
+            buttons=field_buttons(),
+        )
+
     # If we already finished a flow, start fresh
     if state.get("mode") == "done":
         state = reset_session(session_id)
@@ -386,13 +599,12 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
     # Allow manual reset
     if message_lower in RESET_COMMANDS:
         state = reset_session(session_id)
-        return ChatReply(reply=f"Sesja wyzerowana. {initial_prompt()}", nextField="choice")
+        return menu_reply(f"Sesja wyzerowana.\n\n{initial_prompt()}")
 
     # Pending offer acceptance flow override
     pending_order = acceptance_pending.get(session_id) or state.get("pending_accept_order")
     if pending_order:
-        # Allow user to bypass acceptance prompt with top-level commands
-        bypass_cmds = NEW_COMMANDS | EDIT_COMMANDS | LIST_COMMANDS
+        bypass_cmds = NEW_COMMANDS | EDIT_COMMANDS | LIST_COMMANDS | BACK_COMMANDS
         if message_lower in bypass_cmds:
             acceptance_pending.pop(session_id, None)
             state = reset_session(session_id)
@@ -405,11 +617,11 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
         if not order or not order.offer:
             acceptance_pending.pop(session_id, None)
             state = reset_session(session_id)
-            return ChatReply(reply="Oferta wygasła lub zlecenie nie istnieje. " + initial_prompt(), nextField="choice")
+            return menu_reply("Oferta wygasła lub zlecenie nie istnieje.\n\n" + initial_prompt())
         if order.status.lower() == "anulowane":
             acceptance_pending.pop(session_id, None)
             state = reset_session(session_id)
-            return ChatReply(reply="Zlecenie jest anulowane. " + initial_prompt(), nextField="choice")
+            return menu_reply("Zlecenie jest anulowane.\n\n" + initial_prompt())
 
         if message_lower in YES_COMMANDS:
             order.offer.accepted = True
@@ -419,8 +631,8 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             acceptance_pending.pop(session_id, None)
             state["mode"] = "done"
             summary = format_summary(order.data)
-            return ChatReply(
-                reply=(
+            return menu_reply(
+                (
                     f"Oferta zaakceptowana. ID: {order.id}\n"
                     f"{summary}\n"
                     f"Oferta:\n- Cena: {order.offer.price}\n- Planowany termin dostawy: {order.offer.eta}\n- Kierowca: {order.offer.driver}"
@@ -436,69 +648,80 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             persist_store()
             acceptance_pending.pop(session_id, None)
             state["mode"] = "done"
-            return ChatReply(reply="Oferta odrzucona. Jeśli chcesz nową wycenę, napisz 'lista' lub 'edytuj'.", orderId=order.id)
+            return menu_reply(
+                "Oferta odrzucona. Jeśli chcesz nową wycenę, otwórz listę zleceń albo popraw dane.",
+                orderId=order.id,
+            )
 
-        # ask again if unclear
-        return ChatReply(reply="Czy akceptujesz ofertę? (tak/nie)", nextField="confirm_offer")
+        return ChatReply(
+            reply="Czy akceptujesz ofertę?",
+            nextField="confirm_offer",
+            buttons=yes_no_buttons(),
+        )
+
+    if message_lower in LIST_COMMANDS | BACK_COMMANDS and state["mode"] not in {"new", "edit_new_value"}:
+        return show_session_orders(session_id, "Oto Twoje zlecenia i zdarzenia z tej rozmowy.")
+
+    if message_lower in NEW_COMMANDS and state["mode"] not in {"new", "offer_confirm"}:
+        return start_new_order()
+
+    if message_lower in EDIT_COMMANDS and state["mode"] not in {"new", "edit_new_value", "edit_choose_field", "order_card"}:
+        return show_session_orders(session_id, "Które zlecenie chcesz zmienić?")
 
     # Ask for choice if no mode yet
     if state["mode"] is None:
-        if not message or message_lower in {"start", "hej", "cześć", "czesc"}:
-            return ChatReply(reply=initial_prompt(), nextField="choice")
+        if not message or message_lower in START_COMMANDS:
+            return menu_reply(initial_prompt())
 
-        if message_lower in NEW_COMMANDS:
-            state["mode"] = "new"
-            state["step"] = 0
-            prompt = FIELDS[state["step"]][1]
-            return ChatReply(reply=prompt, nextField=FIELDS[state["step"]][0])
+        if "zmien" in message_lower or "edyt" in message_lower:
+            return show_session_orders(session_id, "Które zlecenie chcesz zmienić?")
 
-        if message_lower in EDIT_COMMANDS or "zmien" in message_lower or "edyt" in message_lower:
-            state["mode"] = "edit_select_id"
-            return ChatReply(reply="Podaj ID istniejącego zlecenia do edycji.", nextField="order_id")
-
-        if message_lower in LIST_COMMANDS or "lista" in message_lower:
-            state["mode"] = "list_client"
-            return ChatReply(reply="Podaj nazwę zleceniodawcy, aby wyszukać jego zlecenia.", nextField="client_name")
-
-        return ChatReply(
-            reply=(
-                "Użyj poprawnego polecenia, moge pomóc w obsłudze zlecenia transportowego, wybierz co chcesz zrobić? "
-                "wpisz: 'nowe', 'edytuj' lub 'lista'. "
-                "W dowolnej chwili możesz wpisać 'restart' i zacząć rozmowę od początku."
-            ),
-            nextField="choice",
+        return menu_reply(
+            "Nie rozpoznałem tej prośby. Mogę założyć zlecenie, pokazać listę i zdarzenia albo poprawić istniejące dane."
         )
 
-    # LIST FLOW: ask for client name and return matches
-    if state["mode"] == "list_client":
-        if not message:
-            return ChatReply(reply="Podaj nazwę zleceniodawcy, aby wyszukać.", nextField="client_name")
-        result = list_orders_by_client(message)
-        state["mode"] = "done"
+    if state["mode"] == "select_order":
+        picked = resolve_order_pick(message, state.get("listed_ids") or [])
+        if picked:
+            return open_order_card(session_id, picked)
+        query = message_lower
+        filtered = [
+            order
+            for order in orders_for_session(session_id)
+            if query in (order.data.get("client_name") or "").lower()
+            or query in order.id.lower()
+        ]
+        if filtered:
+            state["listed_ids"] = [order.id for order in filtered]
+            lines = ["Znalazłem takie zlecenia:", ""]
+            lines.extend(order_choice_line(index, order) for index, order in enumerate(filtered, start=1))
+            lines.append("\nWybierz numer.")
+            return ChatReply(
+                reply="\n".join(lines),
+                nextField="order_id",
+                buttons=order_pick_buttons(filtered),
+            )
         return ChatReply(
-            reply=result + "\nCo dalej? wpisz: 'nowe', 'edytuj' lub 'lista'.",
-            nextField="choice",
+            reply="Nie znalazłem takiego zlecenia. Wybierz numer z listy, podaj ID albo załóż nowe.",
+            nextField="order_id",
+            buttons=order_pick_buttons(orders_for_session(session_id)),
         )
 
-    # EDIT FLOW: ask for order id
-    if state["mode"] == "edit_select_id":
-        order = orders.get(message)
-        if not order:
-            return ChatReply(reply="Nie znalazłem zlecenia o tym ID. Podaj poprawne ID.", nextField="order_id")
-        state["edit_order_id"] = message
-        state["mode"] = "edit_choose_field"
-        options = field_options_text()
-        summary = format_summary(order.data)
-        return ChatReply(
-            reply=(
-                f"Znalazłem zlecenie {message}:\n{summary}\n"
-                f"Które pole chcesz zmienić? ({options})\n"
-                "Możliwe jest też usunięcie zlecenia — wpisz 'usuń' w trybie edycji, aby to zrobić."
-            ),
-            nextField="field",
-            collected=order.data,
-            orderId=message,
-        )
+    if state["mode"] == "order_card":
+        if message_lower in EDIT_COMMANDS or message_lower in {"zmień dane", "zmien dane"}:
+            return begin_field_edit()
+        if message_lower in DELETE_COMMANDS:
+            state["mode"] = "delete_confirm"
+            return ChatReply(
+                reply=f"Czy na pewno anulować zlecenie {state['edit_order_id']}?",
+                nextField="confirm_delete",
+                orderId=state["edit_order_id"],
+                buttons=yes_no_buttons(),
+            )
+        order = orders.get(state.get("edit_order_id"))
+        if order:
+            return open_order_card(session_id, order)
+        return show_session_orders(session_id, "To zlecenie jest niedostępne. Oto lista z tej rozmowy.")
 
     # EDIT FLOW: choose field
     if state["mode"] == "edit_choose_field":
@@ -506,24 +729,33 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
         if field_key in DELETE_COMMANDS:
             state["mode"] = "delete_confirm"
             return ChatReply(
-                reply=f"Czy na pewno usunąć zlecenie {state['edit_order_id']}? (tak/nie)",
+                reply=f"Czy na pewno usunąć zlecenie {state['edit_order_id']}?",
                 nextField="confirm_delete",
                 orderId=state["edit_order_id"],
+                buttons=yes_no_buttons(),
             )
         resolved = resolve_field_key(field_key)
         if not resolved:
             options = field_options_text()
-            return ChatReply(reply=f"Nie znam takiego pola. Wybierz jedno z: {options}", nextField="field")
+            return ChatReply(
+                reply=f"Nie znam takiego pola. Wybierz jedno z: {options}",
+                nextField="field",
+                buttons=field_buttons(),
+            )
         state["edit_field"] = resolved
         state["mode"] = "edit_new_value"
-        return ChatReply(reply=f"Podaj nową wartość dla '{field_label(resolved)}':", nextField=resolved)
+        return ChatReply(
+            reply=f"Podaj nową wartość dla „{field_label(resolved)}”:",
+            nextField=resolved,
+            buttons=[ChatButton(label="Powrót", value="lista")],
+        )
 
     if state["mode"] == "delete_confirm":
         order_id = state.get("edit_order_id")
         order = orders.get(order_id)
         if not order_id or not order:
             state = reset_session(session_id)
-            return ChatReply(reply="Zlecenie nie istnieje. Zacznij od nowa.", nextField="choice")
+            return menu_reply("Zlecenie nie istnieje. Zacznij od nowa.")
         if message_lower in YES_COMMANDS:
             order.status = "Anulowane"
             for sid, oid in list(acceptance_pending.items()):
@@ -532,27 +764,19 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             orders[order_id] = order
             persist_store()
             state["mode"] = "done"
-            return ChatReply(
-                reply=f"Zlecenie {order_id} oznaczone jako 'Anulowane'. Co dalej? wpisz: 'nowe', 'edytuj' lub 'lista'.",
+            return menu_reply(
+                f"Zlecenie {order_id} oznaczone jako „Anulowane”. Co dalej?",
                 orderId=order_id,
                 collected=order.data,
                 done=True,
             )
         if message_lower in NO_COMMANDS:
-            state["mode"] = "edit_choose_field"
-            options = field_options_text()
-            return ChatReply(
-                reply=(
-                    "Usunięcie anulowane. Które pole chcesz zmienić? "
-                    f"({options}). Możesz też wpisać 'usuń' aby skasować zlecenie."
-                ),
-                nextField="field",
-                orderId=order_id,
-            )
+            return open_order_card(session_id, order)
         return ChatReply(
-            reply="Potwierdź usunięcie: wpisz 'tak' lub 'nie'.",
+            reply="Potwierdź usunięcie: tak albo nie.",
             nextField="confirm_delete",
             orderId=order_id,
+            buttons=yes_no_buttons(),
         )
 
     # EDIT FLOW: set new value
@@ -562,14 +786,14 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
         order = orders.get(order_id)
         if not order:
             state = reset_session(session_id)
-            return ChatReply(reply="Sesja wygasła, zacznij od nowa.", nextField="choice")
+            return menu_reply("Sesja wygasła, zacznij od nowa.")
         order.data[field_key] = message
         orders[order_id] = order
         persist_store()
         state["mode"] = "done"
         summary = format_summary(order.data)
-        return ChatReply(
-            reply=f"Zaktualizowano zlecenie {order_id}.\nNowe dane:\n{summary}\nCzy chcesz coś jeszcze? (wpisz 'nowe' lub 'edytuj')",
+        return menu_reply(
+            f"Zaktualizowano zlecenie {order_id}.\nNowe dane:\n{summary}\nCo dalej?",
             orderId=order_id,
             collected=order.data,
         )
@@ -593,19 +817,22 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             state["mode"] = "done"
             view_url = public_view_url(public_token, request)
             reply_text = (
-                f"Zlecenie zapisane. ID: {order_id}\n"
-                f"Link do podglądu: {view_url}"
+                f"Zlecenie zapisane i czeka na wycenę.\n"
+                f"ID: {order_id}\n"
+                f"Link do podglądu: {view_url}\n\n"
+                "Możesz teraz otworzyć listę zleceń albo dodać kolejne."
             )
-            return ChatReply(reply=reply_text, done=True, orderId=order_id, collected=state["fields"])
+            return menu_reply(reply_text, done=True, orderId=order_id, collected=state["fields"])
         if message_lower in NO_COMMANDS:
             state = reset_session(session_id)
-            return ChatReply(reply=f"Odrzucono. {initial_prompt()}", nextField="choice")
+            return menu_reply(f"Odrzucono.\n\n{initial_prompt()}")
 
         summary = format_summary(state["fields"])
         return ChatReply(
-            reply=f"Potwierdź 'tak' lub 'nie'.\n{summary}",
+            reply=f"Potwierdź tak albo nie.\n{summary}",
             nextField="confirm",
             collected=state["fields"],
+            buttons=yes_no_buttons(),
         )
 
     # NEW FLOW: Regular field collection
@@ -615,21 +842,31 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
             state["fields"][current_key] = message
             state["step"] += 1
 
+        cancel_btn = [ChatButton(label="Anuluj", value="restart")]
         if state["step"] < len(FIELDS):
             next_key, next_prompt = FIELDS[state["step"]]
-            return ChatReply(reply=f"Dzięki. {next_prompt}", nextField=next_key, collected=state["fields"])
+            step_no = state["step"] + 1
+            extra_buttons = list(cancel_btn)
+            if next_key == "requirements":
+                extra_buttons.insert(0, ChatButton(label="Brak wymagań", value="brak"))
+            return ChatReply(
+                reply=f"Krok {step_no}/{len(FIELDS)}. {next_prompt}",
+                nextField=next_key,
+                collected=state["fields"],
+                buttons=extra_buttons,
+            )
 
-        # Move to confirmation
         summary = format_summary(state["fields"])
         return ChatReply(
-            reply=f"Podsumowanie:\n{summary}\nPotwierdzasz? (tak/nie)",
+            reply=f"Podsumowanie:\n{summary}\nPotwierdzasz?",
             nextField="confirm",
             collected=state["fields"],
+            buttons=yes_no_buttons(),
         )
 
     # Fallback: start over choice
     state = reset_session(session_id)
-    return ChatReply(reply=initial_prompt(), nextField="choice")
+    return menu_reply(initial_prompt())
 
 
 @app.get("/orders/{order_id}/public-link")

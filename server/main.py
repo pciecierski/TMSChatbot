@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from xml.sax.saxutils import escape as xml_escape
 import os
+import re
 import uuid
 import json
 import secrets
@@ -95,11 +96,18 @@ class Visit(BaseModel):
     plates: str
     stage: str
     updatedAt: datetime
+    orderId: Optional[str] = None
+    dock: Optional[str] = None
 
 
 class VisitStageUpdate(BaseModel):
     stage: Optional[str] = None
     advance: bool = False
+
+
+class VisitLinkUpdate(BaseModel):
+    orderId: Optional[str] = None
+    dock: Optional[str] = None
 
 
 # In-memory stores (swap to Redis/DB later)
@@ -110,6 +118,7 @@ sessions: Dict[str, Dict] = {}
 session_notifications: Dict[str, List[str]] = {}
 acceptance_pending: Dict[str, str] = {}
 admin_sessions: set[str] = set()
+admin_revision: int = 0
 
 data_path = Path(__file__).parent / "data"
 data_path.mkdir(exist_ok=True)
@@ -292,11 +301,17 @@ def dict_to_order(data: Dict) -> Order:
     )
 
 
+def bump_admin_revision() -> None:
+    global admin_revision
+    admin_revision += 1
+
+
 def persist_store() -> None:
     payload = [order_to_dict(o) for o in orders.values()]
     tmp = ORDERS_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     tmp.replace(ORDERS_FILE)
+    bump_admin_revision()
 
 
 def yard_to_dict(item: YardRequest) -> Dict:
@@ -328,16 +343,22 @@ def persist_yard() -> None:
     tmp = YARD_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     tmp.replace(YARD_FILE)
+    bump_admin_revision()
 
 
 def visit_to_dict(item: Visit) -> Dict:
-    return {
+    data = {
         "id": item.id,
         "driver_name": item.driver_name,
         "plates": item.plates,
         "stage": item.stage,
         "updatedAt": item.updatedAt.isoformat(),
     }
+    if item.orderId:
+        data["orderId"] = item.orderId
+    if item.dock:
+        data["dock"] = item.dock
+    return data
 
 
 def dict_to_visit(data: Dict) -> Visit:
@@ -347,6 +368,8 @@ def dict_to_visit(data: Dict) -> Visit:
         plates=data.get("plates", ""),
         stage=data.get("stage", VISIT_STAGE_KEYS[0]),
         updatedAt=parse_datetime(data.get("updatedAt")) or utcnow(),
+        orderId=data.get("orderId"),
+        dock=data.get("dock"),
     )
 
 
@@ -355,11 +378,77 @@ def persist_visits() -> None:
     tmp = VISITS_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     tmp.replace(VISITS_FILE)
+    bump_admin_revision()
 
 
 def seed_demo_visits() -> None:
+    """Demo: wizyty na placu powiązane ze zleceniami (awizacja)."""
     visits.clear()
     now = utcnow()
+    demo_orders = [
+        Order(
+            id="ord-demo-1",
+            createdAt=now,
+            data={
+                "client_name": "ACME Logistics",
+                "pickup": "Magazyn DCLOG, Gądki",
+                "delivery": "Berlin DE",
+                "cargo": "24 palety FMCG",
+                "pickup_time": "2026-08-30 14:00",
+                "contact": "brama@dclog.pl",
+                "requirements": "brak",
+            },
+            status="Aktywne",
+            publicToken="demo-token-ord-1",
+            offer=Offer(
+                price="3200 PLN",
+                eta="2026-08-31 10:00",
+                driver="Jan Kowalski",
+                accepted=True,
+                acceptedAt=now,
+            ),
+        ),
+        Order(
+            id="ord-demo-2",
+            createdAt=now,
+            data={
+                "client_name": "Nordic Parts",
+                "pickup": "Magazyn DCLOG, Gądki",
+                "delivery": "Poznań",
+                "cargo": "12 palety części",
+                "pickup_time": "2026-08-30 11:30",
+                "contact": "+48 600 100 200",
+                "requirements": "brak",
+            },
+            status="Aktywne",
+            publicToken="demo-token-ord-2",
+            offer=Offer(
+                price="1800 PLN",
+                eta="2026-08-30 18:00",
+                driver="Anna Nowak",
+                accepted=True,
+                acceptedAt=now,
+            ),
+        ),
+        Order(
+            id="ord-demo-3",
+            createdAt=now,
+            data={
+                "client_name": "FreshCool",
+                "pickup": "Magazyn DCLOG, Gądki",
+                "delivery": "Wrocław",
+                "cargo": "chłodnia 8 europalet",
+                "pickup_time": "2026-08-30 09:00",
+                "contact": "ops@freshcool.pl",
+                "requirements": "chłodnia",
+            },
+            status="Aktywne",
+            publicToken="demo-token-ord-3",
+        ),
+    ]
+    for order in demo_orders:
+        orders[order.id] = order
+
     demo = [
         Visit(
             id="vis-1",
@@ -367,6 +456,8 @@ def seed_demo_visits() -> None:
             plates="WZ 1234A / WZ 5678B",
             stage="dok",
             updatedAt=now,
+            orderId="ord-demo-1",
+            dock="Dok 3",
         ),
         Visit(
             id="vis-2",
@@ -374,6 +465,8 @@ def seed_demo_visits() -> None:
             plates="KR 9A111",
             stage="dokumenty",
             updatedAt=now,
+            orderId="ord-demo-2",
+            dock=None,
         ),
         Visit(
             id="vis-3",
@@ -381,6 +474,8 @@ def seed_demo_visits() -> None:
             plates="PO 2222T",
             stage="zaladunek",
             updatedAt=now,
+            orderId="ord-demo-3",
+            dock="Dok 7",
         ),
     ]
     for item in demo:
@@ -417,12 +512,14 @@ def load_store() -> None:
         seed_demo_visits()
         try:
             persist_visits()
+            persist_store()
         except Exception:
             pass
 
 
 def reset_runtime_state() -> None:
     """Used by tests to isolate cases."""
+    global admin_revision
     orders.clear()
     yard_requests.clear()
     visits.clear()
@@ -430,6 +527,7 @@ def reset_runtime_state() -> None:
     session_notifications.clear()
     acceptance_pending.clear()
     admin_sessions.clear()
+    admin_revision = 0
     reset_conversations()
     seed_demo_visits()
 
@@ -506,6 +604,107 @@ def resolve_field_key(message: str) -> Optional[str]:
         if key in FIELD_KEYS and msg == label.lower():
             return key
     return None
+
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PHONE_RE = re.compile(r"^\+?[\d\s\-()]{7,20}$")
+DATE_TIME_FORMATS = (
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M",
+    "%Y-%m-%dT%H:%M:%S",
+    "%d.%m.%Y %H:%M",
+    "%d.%m.%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M",
+    "%d-%m-%Y %H:%M",
+)
+
+
+def looks_like_datetime(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    normalized = text.replace(",", " ")
+    for fmt in DATE_TIME_FORMATS:
+        try:
+            datetime.strptime(normalized, fmt)
+            return True
+        except ValueError:
+            continue
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed is not None
+    except ValueError:
+        return False
+
+
+def looks_like_duration(value: str) -> bool:
+    text = (value or "").strip().lower()
+    if not text:
+        return False
+    if text.startswith("do ") and looks_like_datetime(text[3:].strip()):
+        return True
+    return bool(re.search(r"\d+\s*(min|minut|m|h|godz|godzin)", text))
+
+
+def validate_input(kind: str, value: str) -> Optional[str]:
+    """Zwraca komunikat błędu albo None, gdy wartość jest OK."""
+    text = (value or "").strip()
+    if not text:
+        return "To pole nie może być puste."
+
+    if kind == "client_name":
+        if len(text) < 2:
+            return "Podaj pełniejszą nazwę zleceniodawcy."
+        return None
+
+    if kind in {"pickup", "delivery", "cargo"}:
+        if len(text) < 3:
+            return "Podaj pełniejszy opis (min. kilka znaków)."
+        return None
+
+    if kind in {"pickup_time", "requested_time", "trailer_pickup_at", "eta"}:
+        if looks_like_datetime(text):
+            return None
+        return (
+            "Nie rozpoznaję daty i godziny. "
+            "Podaj np. 2026-08-30 14:00 albo 30.08.2026 14:00."
+        )
+
+    if kind == "pause_until":
+        if looks_like_duration(text) or looks_like_datetime(text):
+            return None
+        return (
+            "Podaj czas postoju, np. „45 min”, „2 godz” albo „do 14:30” / pełną datę."
+        )
+
+    if kind == "contact":
+        compact = text.replace(" ", "")
+        if EMAIL_RE.match(text) or PHONE_RE.match(text) or PHONE_RE.match(compact):
+            return None
+        return "Podaj e-mail (np. jan@firma.pl) albo telefon (np. +48 600 100 200)."
+
+    if kind == "plates":
+        normalized = normalize_plates(text)
+        if len(normalized) < 4:
+            return "Podaj numer rejestracyjny ciągnika (i naczepy, jeśli jest), np. WZ 1234A / WZ 5678B."
+        return None
+
+    if kind == "driver_name":
+        parts = [p for p in text.split() if p]
+        if len(parts) < 2 or len(text) < 5:
+            return "Podaj imię i nazwisko kierowcy."
+        return None
+
+    return None
+
+
+def validation_reply(error: str, prompt: str, next_field: str, buttons: Optional[List[ChatButton]] = None) -> ChatReply:
+    return ChatReply(
+        reply=f"{error}\n\n{prompt}",
+        nextField=next_field,
+        buttons=buttons or [],
+    )
 
 
 def reset_session(session_id: str) -> Dict:
@@ -640,6 +839,27 @@ def format_visit_progress(visit: Visit) -> str:
             mark = "○"
         suffix = "  (aktualny etap)" if index == current_index else ""
         lines.append(f"{mark} {label}{suffix}")
+
+    order = orders.get(visit.orderId) if visit.orderId else None
+    if order or visit.dock:
+        lines.append("")
+        lines.append("Powiązana awizacja / zlecenie:")
+        if order:
+            data = order.data or {}
+            lines.append(f"- Zlecenie: {order.id} ({data.get('client_name') or 'bez nazwy'})")
+            lines.append(
+                f"- Trasa: {data.get('pickup') or '-'} → {data.get('delivery') or '-'}"
+            )
+            if data.get("cargo"):
+                lines.append(f"- Ładunek: {data['cargo']}")
+            if data.get("pickup_time"):
+                lines.append(f"- Termin: {data['pickup_time']}")
+        elif visit.orderId:
+            lines.append(f"- Zlecenie: {visit.orderId} (brak w systemie)")
+        if visit.dock:
+            lines.append(f"- Dok: {visit.dock}")
+        elif current == "dok":
+            lines.append("- Dok: oczekuje na przypisanie")
     return "\n".join(lines)
 
 
@@ -1348,29 +1568,50 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
         return dispatcher_menu("Wybierz jedną z opcji dyspozytora.")
 
     if state["mode"] == "yard_driver":
+        cancel = [ChatButton(label="Anuluj", value="restart")]
         if not message:
-            return ChatReply(reply="Podaj imię i nazwisko kierowcy.", nextField="driver_name")
+            return ChatReply(reply="Podaj imię i nazwisko kierowcy.", nextField="driver_name", buttons=cancel)
+        err = validate_input("driver_name", message)
+        if err:
+            return validation_reply(err, "Podaj imię i nazwisko kierowcy.", "driver_name", cancel)
         state.setdefault("yard_fields", {})["driver_name"] = message
         state["mode"] = "yard_plates"
         return ChatReply(
             reply="Podaj numer rejestracyjny ciągnika i naczepy.",
             nextField="plates",
-            buttons=[ChatButton(label="Anuluj", value="restart")],
+            buttons=cancel,
         )
 
     if state["mode"] == "yard_plates":
+        cancel = [ChatButton(label="Anuluj", value="restart")]
         if not message:
-            return ChatReply(reply="Podaj numer rejestracyjny ciągnika i naczepy.", nextField="plates")
+            return ChatReply(
+                reply="Podaj numer rejestracyjny ciągnika i naczepy.",
+                nextField="plates",
+                buttons=cancel,
+            )
+        err = validate_input("plates", message)
+        if err:
+            return validation_reply(
+                err,
+                "Podaj numer rejestracyjny ciągnika i naczepy.",
+                "plates",
+                cancel,
+            )
         state.setdefault("yard_fields", {})["plates"] = message
         return after_identity_collected()
 
     if state["mode"] == "yard_detail":
-        if not message:
-            kind = state.get("yard_kind")
-            prompt = YARD_KINDS.get(kind, ("", "Podaj szczegóły zgłoszenia."))[1]
-            return ChatReply(reply=prompt, nextField="yard_detail")
         kind = state.get("yard_kind") or ""
-        state["yard_fields"][yard_detail_key(kind)] = message
+        prompt = YARD_KINDS.get(kind, ("", "Podaj szczegóły zgłoszenia."))[1]
+        detail_key = yard_detail_key(kind)
+        cancel = [ChatButton(label="Anuluj", value="restart")]
+        if not message:
+            return ChatReply(reply=prompt, nextField=detail_key, buttons=cancel)
+        err = validate_input(detail_key, message)
+        if err:
+            return validation_reply(err, prompt, detail_key, cancel)
+        state["yard_fields"][detail_key] = message
         state["mode"] = "yard_confirm"
         summary = format_yard_summary(state["yard_fields"], state["yard_fields"].get("kind_label", ""))
         return ChatReply(
@@ -1555,6 +1796,14 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
         if not order:
             state = reset_session(session_id)
             return reply_menu("Sesja wygasła, zacznij od nowa.")
+        err = validate_input(field_key, message)
+        if err:
+            return validation_reply(
+                err,
+                f"Podaj nową wartość dla „{field_label(field_key)}”:",
+                field_key,
+                [ChatButton(label="Powrót", value="lista")],
+            )
         order.data[field_key] = message
         orders[order_id] = order
         persist_store()
@@ -1607,11 +1856,23 @@ def handle_chat_message(payload: ChatRequest, request: Optional[Request] = None)
     # NEW FLOW: Regular field collection
     if state["mode"] == "new":
         current_key, current_prompt = FIELDS[state["step"]]
+        cancel_btn = [ChatButton(label="Anuluj", value="restart")]
         if message:
+            err = validate_input(current_key, message)
+            if err:
+                step_no = state["step"] + 1
+                extra_buttons = list(cancel_btn)
+                if current_key == "requirements":
+                    extra_buttons.insert(0, ChatButton(label="Brak wymagań", value="brak"))
+                return ChatReply(
+                    reply=f"{err}\n\nKrok {step_no}/{len(FIELDS)}. {current_prompt}",
+                    nextField=current_key,
+                    collected=state["fields"],
+                    buttons=extra_buttons,
+                )
             state["fields"][current_key] = message
             state["step"] += 1
 
-        cancel_btn = [ChatButton(label="Anuluj", value="restart")]
         if state["step"] < len(FIELDS):
             next_key, next_prompt = FIELDS[state["step"]]
             step_no = state["step"] + 1
@@ -1675,6 +1936,22 @@ def list_yard_requests(request: Request) -> Dict[str, YardRequest]:
     return yard_requests
 
 
+@app.get("/admin/feed")
+def admin_feed(request: Request, since: int = 0) -> Dict:
+    require_admin(request)
+    pending = sum(1 for item in yard_requests.values() if item.status == "Oczekuje")
+    return {
+        "revision": admin_revision,
+        "changed": admin_revision > since,
+        "counts": {
+            "orders": len(orders),
+            "yard": len(yard_requests),
+            "visits": len(visits),
+            "yardPending": pending,
+        },
+    }
+
+
 @app.post("/yard-requests/{request_id}/status")
 def set_yard_status(request_id: str, payload: YardStatusUpdate, request: Request):
     require_admin(request)
@@ -1687,6 +1964,12 @@ def set_yard_status(request_id: str, payload: YardStatusUpdate, request: Request
     item.status = status
     yard_requests[request_id] = item
     persist_yard()
+    note = (
+        f"Twoje zgłoszenie „{item.kindLabel}” (ID: {item.id}) ma nowy status: {status}."
+    )
+    enqueue_notification(item.createdBySession, note)
+    if item.createdBySession:
+        send_whatsapp_cloud_message(item.createdBySession, note)
     return {"status": "ok"}
 
 
@@ -1704,12 +1987,34 @@ def set_visit_stage(visit_id: str, payload: VisitStageUpdate, request: Request):
         raise HTTPException(status_code=404, detail="Visit not found")
     if payload.advance:
         item.stage = next_visit_stage(item.stage)
+        if item.stage == "dok" and not item.dock:
+            item.dock = "Dok (do przypisania)"
     elif payload.stage:
         if payload.stage not in VISIT_STAGE_KEYS:
             raise HTTPException(status_code=400, detail="Invalid stage")
         item.stage = payload.stage
     else:
         raise HTTPException(status_code=400, detail="Provide stage or advance")
+    item.updatedAt = utcnow()
+    visits[visit_id] = item
+    persist_visits()
+    return visit_to_dict(item)
+
+
+@app.post("/visits/{visit_id}/link")
+def link_visit(visit_id: str, payload: VisitLinkUpdate, request: Request):
+    require_admin(request)
+    item = visits.get(visit_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Visit not found")
+    if payload.orderId is not None:
+        order_id = payload.orderId.strip()
+        if order_id and order_id not in orders:
+            raise HTTPException(status_code=404, detail="Order not found")
+        item.orderId = order_id or None
+    if payload.dock is not None:
+        dock = payload.dock.strip()
+        item.dock = dock or None
     item.updatedAt = utcnow()
     visits[visit_id] = item
     persist_visits()

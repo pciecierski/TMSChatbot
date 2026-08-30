@@ -35,6 +35,8 @@ pytest
 - `GET /chat/notifications?sessionId=...` – pobiera nowe powiadomienia (np. o ofercie) dla sesji czatu; po złożeniu oferty klient dostaje pytanie o akceptację, a odpowiedź zapisuje status na karcie zlecenia.
 - `GET /yard-requests` / `POST /yard-requests/{id}/status` – zgłoszenia kierowców z terenu parku (wymaga sesji admina).
 - `GET /visits` / `POST /visits/{id}/stage` – postępy wizyt na placu (wymaga sesji admina).
+- `POST /visits/{id}/link` – powiązanie wizyty ze zleceniem (`orderId`) i dokiem (`dock`).
+- `GET /admin/feed?since=` – rewizja danych do auto-odświeżania panelu admina.
 
 ## Trwałość danych
 - Zlecenia: `server/data/orders.json`.

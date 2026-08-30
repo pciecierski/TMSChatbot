@@ -14,6 +14,12 @@ const guardCancel = document.getElementById("admin-guard-cancel");
 const guardError = document.getElementById("admin-guard-error");
 
 const API_BASE = "";
+const LIVE_POLL_MS = 4000;
+
+let liveRevision = 0;
+let liveTimer = null;
+let loading = false;
+let cachedOrders = [];
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -53,7 +59,19 @@ function offerSnippet(offer) {
   `;
 }
 
+function orderOptionsHtml(selectedId) {
+  const options = ['<option value="">— brak powiązania —</option>'];
+  cachedOrders.forEach((order) => {
+    const d = order.data || {};
+    const label = `${order.id} · ${d.client_name || "bez nazwy"} · ${d.pickup || "?"} → ${d.delivery || "?"}`;
+    const selected = order.id === selectedId ? " selected" : "";
+    options.push(`<option value="${escapeHtml(order.id)}"${selected}>${escapeHtml(label)}</option>`);
+  });
+  return options.join("");
+}
+
 function renderOrders(orders) {
+  cachedOrders = orders;
   countEl.textContent = orders.length;
 
   if (!orders.length) {
@@ -238,7 +256,7 @@ function renderYardRequests(items) {
           return;
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        await loadYardRequests();
+        await loadOrders();
       } catch (err) {
         console.error(err);
       }
@@ -274,6 +292,14 @@ function visitStageLabel(stage) {
   return VISIT_STAGE_LABELS[stage] || stage || "-";
 }
 
+function linkedOrderLabel(orderId) {
+  if (!orderId) return "Brak powiązania ze zleceniem";
+  const order = cachedOrders.find((item) => item.id === orderId);
+  if (!order) return `Zlecenie ${orderId} (niedostępne)`;
+  const d = order.data || {};
+  return `${order.id} · ${d.client_name || "bez nazwy"}`;
+}
+
 function renderVisits(items) {
   if (!visitsListEl || !visitsCountEl) return;
   visitsCountEl.textContent = items.length;
@@ -292,9 +318,24 @@ function renderVisits(items) {
           <div class="order-meta"><span class="badge warning">${escapeHtml(visitStageLabel(item.stage))}</span></div>
           <div class="order-meta"><strong>${escapeHtml(item.driver_name || "Kierowca")}</strong></div>
           <div class="order-route">${escapeHtml(item.plates || "-")}</div>
-          <div class="offer-actions">
-            <button type="button" class="visit-advance" data-id="${escapeHtml(item.id)}">Następny etap</button>
-          </div>
+          <div class="order-meta muted">${escapeHtml(linkedOrderLabel(item.orderId))}${item.dock ? ` · ${escapeHtml(item.dock)}` : ""}</div>
+          <form class="visit-link-form" data-id="${escapeHtml(item.id)}">
+            <div class="offer-grid">
+              <label>
+                Zlecenie / awizacja
+                <select name="orderId">${orderOptionsHtml(item.orderId || "")}</select>
+              </label>
+              <label>
+                Dok
+                <input type="text" name="dock" value="${escapeHtml(item.dock || "")}" placeholder="np. Dok 3" />
+              </label>
+            </div>
+            <div class="offer-actions">
+              <button type="submit" class="button secondary">Zapisz powiązanie</button>
+              <button type="button" class="visit-advance" data-id="${escapeHtml(item.id)}">Następny etap</button>
+              <span class="offer-status muted visit-link-status"></span>
+            </div>
+          </form>
         </div>
       `;
     })
@@ -314,9 +355,38 @@ function renderVisits(items) {
           return;
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        await loadVisits();
+        await loadOrders();
       } catch (err) {
         console.error(err);
+      }
+    });
+  });
+
+  visitsListEl.querySelectorAll(".visit-link-form").forEach((form) => {
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const statusSpan = form.querySelector(".visit-link-status");
+      statusSpan.textContent = "Zapisuję...";
+      try {
+        const res = await fetch(`${API_BASE}/visits/${form.dataset.id}/link`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({
+            orderId: form.orderId.value,
+            dock: form.dock.value.trim(),
+          }),
+        });
+        if (res.status === 401) {
+          openGuard();
+          return;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        statusSpan.textContent = "Zapisano.";
+        await loadOrders();
+      } catch (err) {
+        console.error(err);
+        statusSpan.textContent = "Błąd zapisu.";
       }
     });
   });
@@ -339,12 +409,15 @@ async function loadVisits() {
 }
 
 async function loadOrders() {
+  if (loading) return false;
+  loading = true;
   statusEl.textContent = "Ładowanie...";
   refreshBtn.disabled = true;
   try {
     const res = await fetch(`${API_BASE}/orders`, { credentials: "same-origin" });
     if (res.status === 401) {
       openGuard();
+      stopLivePoll();
       statusEl.textContent = "Wymagane logowanie.";
       return false;
     }
@@ -356,7 +429,9 @@ async function loadOrders() {
     renderOrders(orders);
     await loadYardRequests();
     await loadVisits();
-    statusEl.textContent = `Ostatnie odświeżenie: ${new Date().toLocaleTimeString("pl-PL")}`;
+    await syncLiveRevision();
+    statusEl.textContent = `Live · ostatnie odświeżenie: ${new Date().toLocaleTimeString("pl-PL")}`;
+    startLivePoll();
     return true;
   } catch (err) {
     console.error(err);
@@ -364,14 +439,62 @@ async function loadOrders() {
     listEl.innerHTML = "<p class='empty'>Nie udało się pobrać zleceń.</p>";
     return false;
   } finally {
+    loading = false;
     refreshBtn.disabled = false;
   }
+}
+
+async function syncLiveRevision() {
+  try {
+    const res = await fetch(`${API_BASE}/admin/feed?since=0`, { credentials: "same-origin" });
+    if (!res.ok) return;
+    const data = await res.json();
+    liveRevision = data.revision || 0;
+  } catch (err) {
+    console.error("sync revision", err);
+  }
+}
+
+async function pollAdminFeed() {
+  if (document.hidden || loading) return;
+  try {
+    const res = await fetch(`${API_BASE}/admin/feed?since=${liveRevision}`, {
+      credentials: "same-origin",
+    });
+    if (res.status === 401) {
+      openGuard();
+      stopLivePoll();
+      return;
+    }
+    if (!res.ok) return;
+    const data = await res.json();
+    const nextRevision = data.revision || liveRevision;
+    const shouldReload = Boolean(data.changed) && nextRevision > liveRevision;
+    liveRevision = nextRevision;
+    if (shouldReload) {
+      await loadOrders();
+    }
+  } catch (err) {
+    console.error("admin feed", err);
+  }
+}
+
+function startLivePoll() {
+  if (liveTimer) return;
+  liveTimer = setInterval(pollAdminFeed, LIVE_POLL_MS);
+}
+
+function stopLivePoll() {
+  if (!liveTimer) return;
+  clearInterval(liveTimer);
+  liveTimer = null;
 }
 
 refreshBtn.addEventListener("click", loadOrders);
 
 if (logoutBtn) {
   logoutBtn.addEventListener("click", async () => {
+    stopLivePoll();
     try {
       await fetch(`${API_BASE}/admin/logout`, { method: "POST", credentials: "same-origin" });
     } catch (err) {
@@ -383,6 +506,7 @@ if (logoutBtn) {
 
 function openGuard() {
   if (!guardEl) return;
+  stopLivePoll();
   guardEl.classList.remove("hidden");
   guardEl.removeAttribute("hidden");
   guardEl.style.display = "flex";
@@ -456,5 +580,11 @@ if (guardEl && guardForm && guardInput && guardCancel) {
     }
   });
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    pollAdminFeed();
+  }
+});
 
 initAdmin();

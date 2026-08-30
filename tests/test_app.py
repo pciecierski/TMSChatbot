@@ -65,9 +65,9 @@ def test_pages_use_mobile_viewport(client: TestClient):
     assert 'name="viewport"' in home.text
     assert "width=device-width" in home.text
     assert "viewport-fit=cover" in home.text
-    assert "styles.css?v=20260819f" in home.text
+    assert "styles.css?v=20260830a" in home.text
 
-    styles = client.get("/styles.css?v=20260819f")
+    styles = client.get("/styles.css?v=20260830a")
     assert styles.status_code == 200
     assert "overflow-x: hidden" in styles.text
     assert "min-width: 0" in styles.text
@@ -297,6 +297,9 @@ def test_visit_progress_lookup(client: TestClient):
     assert "wizyta rozpoczęta" in result["reply"]
     assert "przygotowane dokumenty" in result["reply"]
     assert "aktualny etap" in result["reply"]
+    assert "Powiązana awizacja" in result["reply"]
+    assert "ord-demo-1" in result["reply"]
+    assert "Dok 3" in result["reply"]
 
 
 def test_visit_progress_not_found(client: TestClient):
@@ -316,7 +319,81 @@ def test_admin_can_advance_visit_stage(client: TestClient):
     assert listed.status_code == 200
     assert "vis-1" in listed.json()
     assert listed.json()["vis-1"]["stage"] == "dok"
+    assert listed.json()["vis-1"]["orderId"] == "ord-demo-1"
     advanced = client.post("/visits/vis-1/stage", json={"advance": True})
     assert advanced.status_code == 200
     assert advanced.json()["stage"] == "zaladunek"
     assert client.get("/visits").json()["vis-1"]["stage"] == "zaladunek"
+
+
+def test_admin_can_link_visit_to_order(client: TestClient):
+    assert admin_login(client).status_code == 200
+    linked = client.post(
+        "/visits/vis-2/link",
+        json={"orderId": "ord-demo-1", "dock": "Dok 5"},
+    )
+    assert linked.status_code == 200
+    assert linked.json()["orderId"] == "ord-demo-1"
+    assert linked.json()["dock"] == "Dok 5"
+    assert client.get("/visits").json()["vis-2"]["dock"] == "Dok 5"
+
+
+def test_yard_status_notifies_chat(client: TestClient):
+    chat(client, "drv-notify", "tak")
+    chat(client, "drv-notify", "Jan Kowalski")
+    chat(client, "drv-notify", "WZ 1234A / WZ 5678B")
+    chat(client, "drv-notify", "pauza")
+    chat(client, "drv-notify", "45 min")
+    done = chat(client, "drv-notify", "tak")
+    assert done["done"] is True
+
+    assert admin_login(client).status_code == 200
+    req_id = list(client.get("/yard-requests").json().values())[0]["id"]
+    updated = client.post(f"/yard-requests/{req_id}/status", json={"status": "Przyjęte"})
+    assert updated.status_code == 200
+
+    notes = client.get("/chat/notifications", params={"sessionId": "drv-notify"})
+    assert notes.status_code == 200
+    messages = notes.json()["messages"]
+    assert messages
+    assert "Przyjęte" in messages[0]
+
+
+def test_admin_feed_reports_revision(client: TestClient):
+    denied = client.get("/admin/feed")
+    assert denied.status_code == 401
+    assert admin_login(client).status_code == 200
+    feed = client.get("/admin/feed", params={"since": 0})
+    assert feed.status_code == 200
+    payload = feed.json()
+    assert "revision" in payload
+    assert payload["counts"]["visits"] >= 1
+    before = payload["revision"]
+    client.post("/visits/vis-1/stage", json={"advance": True})
+    after = client.get("/admin/feed", params={"since": before}).json()
+    assert after["changed"] is True
+    assert after["revision"] > before
+
+
+def test_field_validation_rejects_bad_contact_and_time(client: TestClient):
+    chat(client, "val-1", "nie")
+    chat(client, "val-1", "nowe")
+    chat(client, "val-1", "ACME")
+    chat(client, "val-1", "Warszawa")
+    chat(client, "val-1", "Berlin")
+    chat(client, "val-1", "palety")
+    bad_time = chat(client, "val-1", "jutro rano")
+    assert "Nie rozpoznaję daty" in bad_time["reply"]
+    assert bad_time["nextField"] == "pickup_time"
+    chat(client, "val-1", "2026-08-20 10:00")
+    bad_contact = chat(client, "val-1", "nie-email")
+    assert "e-mail" in bad_contact["reply"].lower() or "telefon" in bad_contact["reply"].lower()
+    assert bad_contact["nextField"] == "contact"
+
+
+def test_plates_validation_on_yard(client: TestClient):
+    chat(client, "plate-1", "tak")
+    chat(client, "plate-1", "Jan Kowalski")
+    bad = chat(client, "plate-1", "ab")
+    assert "rejestracyjny" in bad["reply"].lower()
+    assert bad["nextField"] == "plates"
